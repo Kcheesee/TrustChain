@@ -31,16 +31,37 @@ TrustChain provides:
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Python 3.11+
-- At least one AI API key (Anthropic or OpenAI)
-
-### Installation
+### Option 1: Docker (Recommended)
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/trustchain.git
-cd trustchain/backend
+git clone https://github.com/Kcheesee/TrustChain.git
+cd TrustChain
+
+# Set up environment
+cp backend/.env.example backend/.env
+# Edit backend/.env and add your API keys
+
+# Start with Docker
+docker-compose up -d
+
+# Check health
+curl http://localhost:8000/api/v1/health
+```
+
+**See [DOCKER_SETUP.md](./DOCKER_SETUP.md) for detailed Docker instructions.**
+
+### Option 2: Manual Setup
+
+```bash
+# Prerequisites
+# - Python 3.11+
+# - PostgreSQL 14+ (optional for v1.1)
+# - At least one AI API key (Anthropic or OpenAI)
+
+# Clone and setup
+git clone https://github.com/Kcheesee/TrustChain.git
+cd TrustChain/backend
 
 # Create virtual environment
 python3 -m venv venv
@@ -57,23 +78,30 @@ cp .env.example .env
 ### Run Tests
 
 ```bash
-# Test individual providers
-python test_single_provider.py
+# Run pytest suite (recommended)
+pytest
 
-# Test full orchestrator
-python test_orchestrator_anthropic_only.py
+# Run with coverage
+pytest --cov=backend --cov-report=html
 
-# Test bias detection
-python test_bias_detection.py
+# Run specific test file
+pytest backend/tests/test_bias_detection.py
+
+# Run legacy test scripts
+python test_orchestrator.py
 ```
 
 ### Start API Server
 
 ```bash
+# Development mode
 uvicorn app:app --reload
+
+# Production mode
+uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-Visit http://localhost:8000/docs for interactive API documentation.
+Visit **http://localhost:8000/docs** for interactive API documentation.
 
 ---
 

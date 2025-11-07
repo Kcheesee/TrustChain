@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # =============================================================================
+  # PostgreSQL Database
+  # =============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: trustchain-postgres
+    environment:
+      POSTGRES_USER: trustchain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: trustchain
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustchain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trustchain-network
+    restart: unless-stopped
+
+  # =============================================================================
+  # TrustChain Backend API
+  # =============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trustchain-backend
+    environment:
+      # Database
+      DATABASE_URL: postgresql://trustchain:${POSTGRES_PASSWORD:-changeme}@postgres:5432/trustchain
+      DATABASE_POOL_SIZE: 10
+
+      # AI Provider API Keys (load from .env)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+      # Ollama (optional, for local Llama)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+
+      # Application Settings
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEBUG: ${DEBUG:-True}
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY:-your_secret_key_here_generate_with_openssl_rand_hex_32}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRATION_MINUTES: 60
+
+      # FOIA Compliance
+      ENABLE_AUDIT_LOGGING: ${ENABLE_AUDIT_LOGGING:-True}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-2555}
+
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend:ro  # Read-only for production
+      - backend_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - trustchain-network
+    restart: unless-stopped
+
+  # =============================================================================
+  # Ollama (Optional - for local Llama inference)
+  # =============================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: trustchain-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - trustchain-network
+    restart: unless-stopped
+    profiles:
+      - with-ollama  # Only start when explicitly requested
+
+  # =============================================================================
+  # pgAdmin (Optional - for database management)
+  # =============================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: trustchain-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@trustchain.local
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - trustchain-network
+    restart: unless-stopped
+    profiles:
+      - with-pgadmin  # Only start when explicitly requested
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  ollama_data:
+    driver: local
+  backend_logs:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  trustchain-network:
+    driver: bridge
