@@ -21,11 +21,13 @@ Government AI decisions today are:
 ## ✨ The Solution
 
 TrustChain provides:
-- ✅ **Multi-Model Consensus**: Claude, GPT-4, and Llama evaluate every decision
+- ✅ **Multi-Model Consensus**: Claude, GPT-4, Llama + any custom LLM you add
+- ✅ **Extensible Architecture**: Easy plugin system for Gemini, Cohere, or proprietary models
 - ✅ **5-Layer Bias Detection**: Scans for protected attributes, confidence issues, and safety triggers
 - ✅ **Immutable Audit Trails**: SHA-256 hashing for tamper detection (FOIA compliant)
 - ✅ **Mandatory Human Review**: High-stakes decisions always require human judgment
 - ✅ **Full Transparency**: Complete reasoning from every AI model
+- ✅ **Commercial-Ready**: Dual licensing (Apache 2.0 for government, commercial license available)
 
 ---
 
@@ -267,27 +269,70 @@ curl -X POST http://localhost:8000/api/v1/decisions \
 - FastAPI (REST API)
 - Pydantic (data validation)
 - AsyncIO (parallel execution)
+- PostgreSQL (production database)
+- Docker (containerization)
 
-**AI Providers:**
+**AI Providers (Built-in):**
 - Anthropic (Claude Haiku/Sonnet/Opus)
 - OpenAI (GPT-4/GPT-4o)
 - Ollama (Local Llama 2/3)
 
-**Future:**
-- PostgreSQL (persistent storage)
-- Redis (caching)
-- React (frontend dashboard)
-- Docker (containerization)
+**Extensible Plugin System:**
+- Easy integration for Gemini, Cohere, Mistral, etc.
+- Custom/proprietary LLM support
+- Provider registry for dynamic discovery
+
+---
+
+## 🔌 Adding Custom LLM Providers
+
+TrustChain makes it easy to add support for any LLM:
+
+```python
+# 1. Create your provider (5 minutes)
+from providers import BaseLLMProvider, register_provider
+
+class GeminiProvider(BaseLLMProvider):
+    async def generate_decision(self, prompt, **kwargs):
+        # Your API call here
+        response = await self.client.generate(prompt)
+        return LLMResponse(...)
+
+# 2. Register it
+register_provider("gemini", GeminiProvider, metadata={
+    "description": "Google Gemini Pro",
+    "commercial_use": True
+})
+
+# 3. Use in decisions
+from providers import get_global_registry
+
+registry = get_global_registry()
+provider = registry.create_provider("gemini", config)
+```
+
+**Full Guide:** See [CUSTOM_PROVIDERS.md](CUSTOM_PROVIDERS.md) for complete documentation with examples.
+
+**Commercial Support:** Need help integrating a new provider? We offer professional integration services. See [LICENSE_COMMERCIAL.md](LICENSE_COMMERCIAL.md).
 
 ---
 
 ## 📚 Documentation
 
+**Core Documentation:**
 - [Architecture Diagram](ARCHITECTURE_DIAGRAM.md) - Visual system flow
-- [API Guide](backend/API_GUIDE.md) - REST API reference
 - [Safety Safeguards](SAFETY_SAFEGUARDS.md) - Bias detection deep dive
-- [Backend README](backend/README.md) - Technical setup
-- [Interview FAQ](INTERVIEW_FAQ.md) - Talking points for recruiters
+- [Docker Setup Guide](DOCKER_SETUP.md) - Production deployment
+- [Complete MVP Guide](COMPLETE_MVP_GUIDE.md) - End-to-end usage
+
+**Developer Guides:**
+- [Custom Providers](CUSTOM_PROVIDERS.md) - Add new LLM integrations
+- [API Reference](backend/API_GUIDE.md) - REST API documentation
+- [Testing Guide](backend/README.md) - Running tests
+
+**Commercial:**
+- [Commercial Licensing](LICENSE_COMMERCIAL.md) - Enterprise options
+- [Future Improvements](FUTURE_IMPROVEMENTS.md) - Roadmap
 
 ---
 
