@@ -5,7 +5,7 @@ Defines the data structures for government decisions, consensus outcomes,
 and FOIA-compliant audit trails.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
@@ -37,6 +37,8 @@ class ModelDecision(BaseModel):
     Represents one model's analysis of a case, including its reasoning
     and confidence level. Multiple ModelDecisions combine to form consensus.
     """
+    model_config = ConfigDict(protected_namespaces=())
+    
     model_provider: str = Field(..., description="Provider name (anthropic, openai, llama)")
     model_name: str = Field(..., description="Specific model version used")
     decision: DecisionOutcome = Field(..., description="The model's decision")
@@ -47,8 +49,9 @@ class ModelDecision(BaseModel):
     latency_ms: Optional[float] = Field(None, description="Response time in milliseconds")
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
             "example": {
                 "model_provider": "anthropic",
                 "model_name": "claude-3-opus-20240229",
@@ -60,6 +63,7 @@ class ModelDecision(BaseModel):
                 "latency_ms": 2340.5
             }
         }
+    )
 
 
 class ConsensusAnalysis(BaseModel):
@@ -75,15 +79,16 @@ class ConsensusAnalysis(BaseModel):
     confidence_variance: float = Field(..., description="Variance in confidence scores")
     reasoning_divergence: Optional[str] = Field(None, description="Analysis of reasoning differences")
 
-    @validator('agreement_level')
+    @field_validator('agreement_level')
+    @classmethod
     def validate_agreement(cls, v):
         """Ensure agreement level is in valid range."""
         if not 0.0 <= v <= 1.0:
             raise ValueError("Agreement level must be between 0 and 1")
         return v
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "agreement_level": 0.85,
                 "majority_decision": "approved",
@@ -92,6 +97,7 @@ class ConsensusAnalysis(BaseModel):
                 "reasoning_divergence": None
             }
         }
+    )
 
 
 class BiasDetection(BaseModel):
@@ -107,8 +113,8 @@ class BiasDetection(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in bias detection")
     recommendation: Optional[str] = Field(None, description="Recommended action")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "bias_detected": False,
                 "bias_type": None,
@@ -117,6 +123,7 @@ class BiasDetection(BaseModel):
                 "recommendation": None
             }
         }
+    )
 
 
 class Decision(BaseModel):
@@ -126,6 +133,8 @@ class Decision(BaseModel):
     Represents a full government decision with multi-model consensus,
     audit trail, and FOIA compliance metadata.
     """
+    model_config = ConfigDict(protected_namespaces=())
+    
     decision_id: str = Field(..., description="Unique decision identifier")
     case_id: str = Field(..., description="Government case/application ID")
     decision_type: str = Field(..., description="Type of decision (e.g., 'unemployment_benefits')")
@@ -156,8 +165,9 @@ class Decision(BaseModel):
     foia_compliant: bool = Field(default=True, description="Whether decision meets FOIA requirements")
     audit_hash: Optional[str] = Field(None, description="Cryptographic hash for audit trail")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
             "example": {
                 "decision_id": "dec_2025_001234",
                 "case_id": "unemp_app_987654",
@@ -172,6 +182,7 @@ class Decision(BaseModel):
                 "final_decision": "approved"
             }
         }
+    )
 
     def calculate_audit_hash(self) -> str:
         """
@@ -259,8 +270,8 @@ class DecisionRequest(BaseModel):
     require_consensus: bool = Field(default=True, description="Whether to require model consensus")
     applicant_id: Optional[str] = Field(None, description="Anonymized applicant ID")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "case_id": "unemp_app_987654",
                 "decision_type": "unemployment_benefits",
@@ -274,6 +285,7 @@ class DecisionRequest(BaseModel):
                 "require_consensus": True
             }
         }
+    )
 
 
 class DecisionResponse(BaseModel):
@@ -290,8 +302,8 @@ class DecisionResponse(BaseModel):
     requires_human_review: bool
     audit_hash: str
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "decision_id": "dec_2025_001234",
                 "status": "completed",
@@ -305,3 +317,4 @@ class DecisionResponse(BaseModel):
                 "audit_hash": "a1b2c3d4e5f6..."
             }
         }
+    )

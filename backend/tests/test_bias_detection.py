@@ -2,8 +2,9 @@
 Unit tests for bias detection system
 """
 import pytest
-from services.bias_detection import BiasDetector
-from models.decision import ModelDecision, ConsensusDecision
+from services.bias_detection import BiasDetectionService as BiasDetector
+from models.decision import ModelDecision, ConsensusAnalysis
+
 
 
 class TestBiasDetector:
@@ -26,7 +27,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="approve",
             model_decisions=decisions
@@ -50,7 +51,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="deny",
             model_decisions=decisions
@@ -74,7 +75,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="approve",
             model_decisions=decisions
@@ -98,7 +99,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="approve",
             model_decisions=decisions
@@ -122,7 +123,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="approve",
             model_decisions=decisions
@@ -153,7 +154,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=0.5,  # 50% consensus (low)
             final_decision="approve",
             model_decisions=decisions
@@ -176,7 +177,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="deny",
             model_decisions=decisions
@@ -200,7 +201,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="approve",
             model_decisions=decisions
@@ -225,7 +226,7 @@ class TestBiasDetector:
             )
         ]
 
-        consensus = ConsensusDecision(
+        consensus = ConsensusAnalysis(
             consensus_level=1.0,
             final_decision="deny",
             model_decisions=decisions
