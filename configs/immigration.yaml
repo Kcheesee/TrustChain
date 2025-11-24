@@ -1,0 +1,118 @@
+# TrustChain Configuration: Immigration Decisions
+#
+# CRITICAL: Immigration decisions can have life-altering consequences.
+# This configuration enforces maximum scrutiny and mandatory human review.
+#
+# Built with care by Kareem & Claude
+
+decision_type: "immigration_deportation"
+
+# Evaluation strategies
+strategies:
+  - name: "multi_model_consensus"
+    enabled: true
+    config:
+      consensus_threshold: 0.80  # Higher threshold for critical decisions
+      use_confidence_weighting: true
+      provider_weights:
+        anthropic: 1.0
+        openai: 1.0
+        llama: 0.7  # Lower weight for local model on critical decisions
+      min_confidence_threshold: 0.6
+
+  # Detailed criteria analysis for immigration
+  - name: "criteria_decomposition"
+    enabled: true  # ENABLED for immigration - need detailed breakdown
+    config:
+      criteria:
+        legal_status:
+          weight: 0.30
+          description: "Current immigration status and documentation"
+          threshold: 0.9
+        compliance_history:
+          weight: 0.25
+          description: "History of compliance with immigration requirements"
+          threshold: 0.85
+        family_ties:
+          weight: 0.20
+          description: "US citizen/resident family connections"
+          threshold: 0.7
+        hardship_factors:
+          weight: 0.15
+          description: "Potential hardship if removed"
+          threshold: 0.6
+        public_safety:
+          weight: 0.10
+          description: "Public safety considerations"
+          threshold: 0.95
+      scoring_type: "threshold"
+      require_all_criteria: false
+
+  # MANDATORY adversarial review for life-altering decisions
+  - name: "adversarial_review"
+    enabled: true
+    config:
+      challenge_strength: "aggressive"  # Maximum scrutiny
+      require_defense: true
+      max_challenges: 5  # More challenges for critical decisions
+      survival_threshold: 0.75  # Higher bar to survive
+
+# Maximum analyzer coverage for immigration
+analyzers:
+  - name: "protected_attributes"
+    enabled: true
+    blocking: true  # MUST be blocking
+    config:
+      strict_mode: true
+      confidence_threshold: 0.8  # Higher threshold
+      high_stakes_types:
+        - "immigration_deportation"
+        - "asylum_decision"
+        - "visa_denial"
+
+  # Proxy variables CRITICAL for immigration - national origin proxies
+  - name: "proxy_variables"
+    enabled: true
+    blocking: true  # MUST block on proxy detection
+    config:
+      sensitivity: "very_high"
+      additional_patterns:
+        country_origin: ["from that country", "those countries", "country of origin"]
+        language_proxy: ["accent", "speaks english poorly", "language barrier"]
+        name_patterns: ["foreign name", "ethnic name", "hard to pronounce"]
+        religion_proxy: ["religious attire", "religious practice", "observes"]
+      decision_types:
+        - "immigration_deportation"
+        - "asylum_decision"
+        - "visa_denial"
+        - "naturalization"
+
+# Comprehensive audit output
+outputs:
+  - name: "internal_audit"
+    enabled: true
+    config:
+      format: "compliance"
+      include_raw_responses: true  # Full transparency
+      include_config_snapshot: true
+
+  # Consumer explanation for applicants (due process)
+  - name: "consumer_explanation"
+    enabled: true
+    config:
+      language_level: "formal"  # Formal language for legal context
+      include_appeal_info: true  # CRITICAL for due process
+      include_feedback: true
+      max_factors: 7  # More detail for life-altering decisions
+      redact_model_names: true
+
+# Conservative thresholds - err on side of caution
+thresholds:
+  min_confidence: 0.85  # Very high confidence required
+  auto_approve_threshold: 0.99  # Almost never auto-approve
+  auto_deny_threshold: 0.01  # Almost never auto-deny
+
+# Maximum safety
+require_all_strategies: false
+fail_open: false  # CRITICAL: NEVER set to true
+human_review_on_error: true

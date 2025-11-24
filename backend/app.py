@@ -4,28 +4,44 @@ TrustChain FastAPI Application
 REST API for multi-model AI decision-making with government compliance.
 
 Endpoints:
-- POST /api/v1/decisions - Submit new decision request
-- GET /api/v1/decisions/{decision_id} - Retrieve decision
-- GET /api/v1/health - System health check
-- GET /api/v1/providers/status - AI provider status
+    v1 (Legacy - Orchestrator-based):
+    - POST /api/v1/decisions - Submit new decision request
+    - GET /api/v1/decisions/{decision_id} - Retrieve decision
+    - GET /api/v1/health - System health check
+    - GET /api/v1/providers/status - AI provider status
+
+    v2 (New - Modular TrustChain service):
+    - POST /api/v2/evaluate - Evaluate using TrustChain service
+    - GET /api/v2/components - List registered components
+    - GET /api/v2/config/{config_name} - Load and validate config
 
 Run with: uvicorn app:app --reload
+
+Built with care by Kareem & Claude
 """
 
 import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from providers import ProviderConfig
-from services import DecisionOrchestrator
+from services import DecisionOrchestrator, TrustChain
 from models import DecisionRequest, DecisionResponse, DecisionStatus
+
+# Import core components to register them
+from core.registry import get_registry
+import strategies  # noqa: F401 - Registers strategy components
+import analyzers  # noqa: F401 - Registers analyzer components
+import outputs  # noqa: F401 - Registers output components
 
 # Load environment variables
 load_dotenv()
@@ -37,12 +53,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global orchestrator instance
+# Global service instances
 orchestrator: Optional[DecisionOrchestrator] = None
+trustchain_service: Optional[TrustChain] = None
 
-# In-memory decision storage (will be replaced with database)
-# Format: {decision_id: Decision}
-decision_store: Dict[str, Any] = {}
+# In-memory storage (will be replaced with database)
+decision_store: Dict[str, Any] = {}  # Legacy v1 decisions
+accountability_store: Dict[str, Any] = {}  # New v2 results
+
+
+# Request models for v2 API
+class EvaluateRequest(BaseModel):
+    """Request model for TrustChain evaluation."""
+    case_id: str
+    decision_type: str
+    input_data: Dict[str, Any]
+    context: Optional[Dict[str, Any]] = None
+    config_name: Optional[str] = None  # Load from configs/ directory
+
+
+class ConfigLoadRequest(BaseModel):
+    """Request model for loading a configuration."""
+    config_name: str
 
 
 @asynccontextmanager
@@ -50,10 +82,10 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
 
-    Initializes the orchestrator on startup, cleans up on shutdown.
+    Initializes both legacy orchestrator and new TrustChain service on startup.
     This runs once when the server starts, not on every request.
     """
-    global orchestrator
+    global orchestrator, trustchain_service
 
     logger.info("🚀 Starting TrustChain API...")
 
@@ -61,6 +93,7 @@ async def lifespan(app: FastAPI):
     anthropic_config = None
     openai_config = None
     llama_config = None
+    providers = []
 
     if os.getenv("ANTHROPIC_API_KEY"):
         anthropic_config = ProviderConfig(
@@ -85,7 +118,7 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ Llama provider configured")
 
-    # Create orchestrator
+    # Create legacy orchestrator (v1 API)
     orchestrator = DecisionOrchestrator(
         anthropic_config=anthropic_config,
         openai_config=openai_config,
@@ -93,7 +126,20 @@ async def lifespan(app: FastAPI):
         require_consensus_threshold=float(os.getenv("CONSENSUS_THRESHOLD", "0.66"))
     )
 
-    logger.info("✅ TrustChain API ready")
+    # Initialize TrustChain service (v2 API) with providers from orchestrator
+    trustchain_service = TrustChain(providers=orchestrator.providers)
+
+    # Log registered components
+    registry = get_registry()
+    components = registry.list_components()
+    logger.info(
+        f"Registered components: "
+        f"{len(components['strategies'])} strategies, "
+        f"{len(components['analyzers'])} analyzers, "
+        f"{len(components['outputs'])} outputs"
+    )
+
+    logger.info("✅ TrustChain API ready (v1 + v2 endpoints available)")
 
     yield  # Server runs here
 
@@ -396,6 +442,254 @@ Please evaluate this case and provide:
 1. Your decision
 2. Step-by-step reasoning
 3. Your confidence level
+"""
+
+
+# ============================================================================
+# V2 API ENDPOINTS - Modular TrustChain Service
+# ============================================================================
+
+@app.post("/api/v2/evaluate", status_code=status.HTTP_201_CREATED)
+async def evaluate_v2(request: EvaluateRequest):
+    """
+    Evaluate a case using the new modular TrustChain service.
+
+    This endpoint uses the plugin-based architecture with configurable
+    strategies, analyzers, and outputs.
+
+    Args:
+        request: EvaluateRequest with case details and optional config
+
+    Returns:
+        AccountabilityResult with decision, analysis, and audit trail
+
+    Example:
+        POST /api/v2/evaluate
+        {
+            "case_id": "unemp_001",
+            "decision_type": "unemployment_benefits",
+            "input_data": {"employment_months": 18, ...},
+            "config_name": "unemployment_benefits"
+        }
+    """
+    global trustchain_service
+
+    if not trustchain_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TrustChain service not initialized"
+        )
+
+    logger.info(f"📥 [v2] New evaluation request: {request.case_id}")
+
+    try:
+        # Load config if specified
+        if request.config_name:
+            config_path = Path(__file__).parent.parent / "configs" / f"{request.config_name}.yaml"
+            if config_path.exists():
+                trustchain_service = TrustChain.from_config(
+                    str(config_path),
+                    providers=orchestrator.providers if orchestrator else []
+                )
+                logger.info(f"Loaded config: {request.config_name}")
+            else:
+                logger.warning(f"Config not found: {config_path}, using defaults")
+
+        # Build context
+        context = request.context or {}
+        context["decision_type"] = request.decision_type
+
+        # Build prompt if not provided
+        if "prompt" not in context:
+            context["prompt"] = _format_prompt_v2(request)
+            context["system_context"] = context.get("policy_context", "")
+
+        # Run evaluation
+        result = await trustchain_service.evaluate(
+            case_id=request.case_id,
+            input_data=request.input_data,
+            context=context
+        )
+
+        # Store result
+        accountability_store[result.result_id] = result
+
+        logger.info(
+            f"✅ [v2] Evaluation complete: {result.result_id} - "
+            f"{result.final_decision.value} (review={result.requires_human_review})"
+        )
+
+        return result.to_dict()
+
+    except Exception as e:
+        logger.error(f"❌ [v2] Evaluation failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Evaluation failed: {str(e)}"
+        )
+
+
+@app.get("/api/v2/results/{result_id}")
+async def get_result_v2(result_id: str):
+    """
+    Retrieve an accountability result by ID.
+
+    Returns the full AccountabilityResult including:
+    - Final decision and confidence
+    - Strategy execution details
+    - Analysis results from all analyzers
+    - Audit hash for verification
+    """
+    if result_id not in accountability_store:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Result {result_id} not found"
+        )
+
+    result = accountability_store[result_id]
+
+    return {
+        "result": result.to_dict(),
+        "audit_verified": result.verify_integrity(),
+        "foia_report": result.to_foia_report()
+    }
+
+
+@app.get("/api/v2/results")
+async def list_results_v2(
+    decision_type: Optional[str] = None,
+    requires_review: Optional[bool] = None,
+    limit: int = Query(default=100, le=1000)
+):
+    """
+    List accountability results with optional filtering.
+
+    Query Parameters:
+        decision_type: Filter by type (unemployment_benefits/hiring/etc)
+        requires_review: Filter by review status
+        limit: Max results to return (default 100, max 1000)
+    """
+    results = list(accountability_store.values())
+
+    # Apply filters
+    if decision_type:
+        results = [r for r in results if r.decision_type == decision_type]
+
+    if requires_review is not None:
+        results = [r for r in results if r.requires_human_review == requires_review]
+
+    # Limit and return summaries
+    results = results[:limit]
+
+    return {
+        "total": len(accountability_store),
+        "filtered": len(results),
+        "results": [
+            {
+                "result_id": r.result_id,
+                "case_id": r.case_id,
+                "decision_type": r.decision_type,
+                "final_decision": r.final_decision.value,
+                "confidence": r.overall_confidence,
+                "requires_review": r.requires_human_review,
+                "review_triggers": [t.value for t in r.review_triggers],
+                "timestamp": r.timestamp.isoformat(),
+            }
+            for r in results
+        ]
+    }
+
+
+@app.get("/api/v2/components")
+async def list_components():
+    """
+    List all registered TrustChain components.
+
+    Returns available strategies, analyzers, and output generators
+    that can be used in configurations.
+    """
+    registry = get_registry()
+    return {
+        "components": registry.list_components(),
+        "metadata": registry.get_component_metadata(),
+    }
+
+
+@app.get("/api/v2/configs")
+async def list_configs():
+    """
+    List available configuration files.
+
+    Returns list of YAML configs in the configs/ directory.
+    """
+    config_dir = Path(__file__).parent.parent / "configs"
+    if not config_dir.exists():
+        return {"configs": []}
+
+    configs = []
+    for config_file in config_dir.glob("*.yaml"):
+        configs.append({
+            "name": config_file.stem,
+            "path": str(config_file),
+        })
+
+    return {"configs": configs}
+
+
+@app.get("/api/v2/configs/{config_name}")
+async def get_config(config_name: str):
+    """
+    Load and validate a configuration file.
+
+    Args:
+        config_name: Name of config (without .yaml extension)
+
+    Returns:
+        Parsed configuration with validation results
+    """
+    from core.config import TrustChainConfig
+
+    config_path = Path(__file__).parent.parent / "configs" / f"{config_name}.yaml"
+
+    if not config_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Config '{config_name}' not found"
+        )
+
+    try:
+        config = TrustChainConfig.from_yaml(str(config_path))
+        errors = config.validate()
+
+        return {
+            "name": config_name,
+            "config": config.to_dict(),
+            "valid": len([e for e in errors if not e.startswith("WARNING")]) == 0,
+            "warnings": [e for e in errors if e.startswith("WARNING")],
+            "errors": [e for e in errors if not e.startswith("WARNING")],
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to load config: {str(e)}"
+        )
+
+
+def _format_prompt_v2(request: EvaluateRequest) -> str:
+    """Format input data into a prompt for v2 API."""
+    formatted_data = "\n".join([f"- {k}: {v}" for k, v in request.input_data.items()])
+    return f"""
+Decision Request - Case #{request.case_id}
+Type: {request.decision_type}
+
+Case Details:
+{formatted_data}
+
+Please evaluate this case and provide:
+1. Your decision (APPROVE, DENY, or NEEDS_REVIEW)
+2. Step-by-step reasoning
+3. Your confidence level (0-1)
 """
 
 

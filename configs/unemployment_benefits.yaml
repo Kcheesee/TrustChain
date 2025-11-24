@@ -1,0 +1,110 @@
+# TrustChain Configuration: Unemployment Benefits
+#
+# This configuration is designed for evaluating unemployment benefit
+# applications with high accountability and bias protection.
+#
+# Built with care by Kareem & Claude
+
+decision_type: "unemployment_benefits"
+
+# Evaluation strategies determine HOW decisions are made
+strategies:
+  - name: "multi_model_consensus"
+    enabled: true
+    config:
+      consensus_threshold: 0.66  # 2/3 agreement required
+      use_confidence_weighting: true
+      provider_weights:
+        anthropic: 1.0
+        openai: 1.0
+        llama: 0.8
+      min_confidence_threshold: 0.5
+
+  # Break eligibility into scored criteria
+  - name: "criteria_decomposition"
+    enabled: false  # Enable for detailed eligibility breakdown
+    config:
+      criteria:
+        employment_duration:
+          weight: 0.25
+          description: "Minimum employment period requirement"
+          threshold: 0.7
+        termination_reason:
+          weight: 0.30
+          description: "Reason for job loss (layoff vs quit vs fired)"
+          threshold: 0.8
+        availability:
+          weight: 0.20
+          description: "Available and able to work"
+          threshold: 0.9
+        job_search:
+          weight: 0.15
+          description: "Actively seeking employment"
+          threshold: 0.7
+        prior_benefits:
+          weight: 0.10
+          description: "Prior benefit history and compliance"
+          threshold: 0.6
+      scoring_type: "threshold"
+      require_all_criteria: true
+
+  # Challenge decisions before approval
+  - name: "adversarial_review"
+    enabled: false  # Enable for additional scrutiny
+    config:
+      challenge_strength: "light"  # Less aggressive for benefits
+      require_defense: true
+      max_challenges: 2
+      survival_threshold: 0.7
+
+# Analyzers check for bias and safety issues
+analyzers:
+  - name: "protected_attributes"
+    enabled: true
+    blocking: true  # Failures require human review
+    config:
+      strict_mode: true
+      confidence_threshold: 0.7
+      high_stakes_types:
+        - "unemployment_benefits"
+        - "benefit_termination"
+
+  # Detect indirect discrimination (ZIP code, etc.)
+  - name: "proxy_variables"
+    enabled: true
+    blocking: false  # Flag but don't block for benefits
+    config:
+      sensitivity: "medium"
+      decision_types:
+        - "unemployment_benefits"
+        - "benefit_termination"
+
+# Outputs format results for different audiences
+outputs:
+  - name: "internal_audit"
+    enabled: true
+    config:
+      include_raw_responses: false
+      include_config_snapshot: true
+      format: "full"
+
+  # Plain-language explanation for applicants (ECOA compliance)
+  - name: "consumer_explanation"
+    enabled: true
+    config:
+      language_level: "simple"  # Accessible language
+      include_appeal_info: true
+      include_feedback: true
+      max_factors: 5
+      redact_model_names: true
+
+# Decision thresholds
+thresholds:
+  min_confidence: 0.7
+  auto_approve_threshold: 0.9
+  auto_deny_threshold: 0.1
+
+# Behavior flags
+require_all_strategies: false
+fail_open: false  # NEVER set to true in production
+human_review_on_error: true

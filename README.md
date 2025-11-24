@@ -111,12 +111,43 @@ Visit **http://localhost:8000/docs** for interactive API documentation.
 
 ![Architecture Diagram](ARCHITECTURE_DIAGRAM.md)
 
+### Modular Plugin Architecture (Phase 1 - NEW!)
+
+TrustChain now features a modular plugin architecture with three types of components:
+
+```
+TrustChain/backend/
+├── core/                     # Core abstractions
+│   ├── base.py              # BaseStrategy, BaseAnalyzer, BaseOutput
+│   ├── result.py            # StrategyResult, AnalysisResult, AccountabilityResult
+│   ├── registry.py          # Plugin registration system
+│   └── config.py            # YAML configuration loader
+│
+├── strategies/              # HOW accountability is established
+│   └── multi_model_consensus.py
+│
+├── analyzers/               # WHAT to check for
+│   └── protected_attributes.py
+│
+├── outputs/                 # WHO gets what format
+│   └── internal_audit.py
+│
+├── configs/                 # YAML configuration files
+│   ├── unemployment_benefits.yaml
+│   ├── hiring.yaml
+│   └── immigration.yaml
+│
+└── services/
+    ├── trustchain.py        # NEW: Main entry point
+    └── orchestrator.py      # Legacy (still supported)
+```
+
 **High-Level Flow:**
-1. **User submits case** → FastAPI endpoint
-2. **Orchestrator queries 3 AI models** → Parallel execution (Claude, GPT-4, Llama)
-3. **Parse responses** → Extract decisions + reasoning
-4. **Analyze consensus** → Agreement level, confidence variance
-5. **Run bias detection** → 5-layer safety checks
+1. **User submits case** → FastAPI endpoint (v1 or v2)
+2. **Load configuration** → YAML-based strategy/analyzer/output selection
+3. **Run strategies** → Multi-model consensus, criteria decomposition, etc.
+4. **Run analyzers** → Bias detection, confidence calibration, etc.
+5. **Generate outputs** → Internal audit, consumer explanation, etc.
 6. **Generate audit hash** → SHA-256 for tamper detection
 7. **Return decision** → Auto-approve OR flag for human review
 
@@ -163,7 +194,71 @@ Hard stops that override all other logic:
 
 ## 📡 API Examples
 
-### Submit Decision
+### V2 API (NEW - Recommended)
+
+The v2 API uses the modular plugin architecture with YAML configuration:
+
+```bash
+# Submit evaluation with config
+curl -X POST http://localhost:8000/api/v2/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "case_id": "unemp_001",
+    "decision_type": "unemployment_benefits",
+    "input_data": {
+      "employment_duration_months": 18,
+      "termination_reason": "company_layoff",
+      "prior_earnings_annual": 45000,
+      "available_for_work": true,
+      "actively_seeking_work": true
+    },
+    "config_name": "unemployment_benefits"
+  }'
+```
+
+### V2 Response
+
+```json
+{
+  "result_id": "tc_20250124_103045_abc12345",
+  "case_id": "unemp_001",
+  "decision_type": "unemployment_benefits",
+  "final_decision": "approved",
+  "overall_confidence": 0.88,
+  "requires_human_review": false,
+  "review_triggers": [],
+  "strategy_result": {
+    "strategy_name": "multi_model_consensus",
+    "decision": "approved",
+    "confidence": 0.88,
+    "agreement_level": 1.0
+  },
+  "analysis_results": [
+    {
+      "analyzer_name": "protected_attributes",
+      "passed": true,
+      "flags": [],
+      "warnings": []
+    }
+  ],
+  "audit_hash": "a1b2c3d4e5f6..."
+}
+```
+
+### V2 Additional Endpoints
+
+```bash
+# List registered components
+curl http://localhost:8000/api/v2/components
+
+# List available configs
+curl http://localhost:8000/api/v2/configs
+
+# Validate a config
+curl http://localhost:8000/api/v2/configs/unemployment_benefits
+```
+
+### V1 API (Legacy - Still Supported)
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/decisions \
@@ -183,7 +278,7 @@ curl -X POST http://localhost:8000/api/v1/decisions \
   }'
 ```
 
-### Response
+### V1 Response
 
 ```json
 {
@@ -365,15 +460,25 @@ python test_api.py
 - [x] Audit trail with hashing
 - [x] REST API with Swagger docs
 - [x] Test suite
+- [x] **Phase 1: Modular Plugin Architecture** (NEW!)
+  - [x] Core abstractions (BaseStrategy, BaseAnalyzer, BaseOutput)
+  - [x] Plugin registry system
+  - [x] YAML configuration loader
+  - [x] TrustChain service (v2 API)
+  - [x] Multi-model consensus strategy
+  - [x] Protected attributes analyzer
+  - [x] Internal audit output generator
 
 ### In Progress 🚧
 - [ ] PostgreSQL integration
 - [ ] Frontend dashboard (React)
 - [ ] JWT authentication
 
-### Planned 📅
+### Planned 📅 (Phase 2-4)
+- [ ] Additional strategies (criteria decomposition, adversarial review)
+- [ ] Additional analyzers (proxy variables, reasoning quality)
+- [ ] Additional outputs (consumer explanation, compliance report)
 - [ ] WebSocket support (real-time updates)
-- [ ] Advanced consensus algorithms (weighted voting)
 - [ ] LIME/SHAP explainability
 - [ ] Demographic blind testing
 - [ ] Docker deployment

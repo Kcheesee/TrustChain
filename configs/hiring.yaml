@@ -1,0 +1,106 @@
+# TrustChain Configuration: Hiring Decisions
+#
+# This configuration is designed for evaluating job applications
+# with focus on fairness and protected attribute detection.
+#
+# Built with care by Kareem & Claude
+
+decision_type: "hiring"
+
+# Evaluation strategies
+strategies:
+  - name: "multi_model_consensus"
+    enabled: true
+    config:
+      consensus_threshold: 0.66
+      use_confidence_weighting: true
+      provider_weights:
+        anthropic: 1.0
+        openai: 1.0
+        llama: 0.8
+
+  # Criteria decomposition breaks down hiring into scored dimensions
+  - name: "criteria_decomposition"
+    enabled: false  # Enable for single-model deployments
+    config:
+      criteria:
+        technical_skills:
+          weight: 0.35
+          description: "Required technical competencies for the role"
+        relevant_experience:
+          weight: 0.25
+          description: "Work history relevant to position"
+        education:
+          weight: 0.15
+          description: "Educational background and certifications"
+        communication:
+          weight: 0.15
+          description: "Communication and collaboration abilities"
+        problem_solving:
+          weight: 0.10
+          description: "Analytical and problem-solving capabilities"
+      scoring_type: "percentage"
+      require_all_criteria: false
+      min_passing_score: 0.65
+
+  # Adversarial review challenges initial decisions
+  - name: "adversarial_review"
+    enabled: false  # Enable for high-confidence review
+    config:
+      challenge_strength: "medium"
+      require_defense: true
+      max_challenges: 3
+      survival_threshold: 0.6
+
+# Analyzers for bias detection
+analyzers:
+  - name: "protected_attributes"
+    enabled: true
+    blocking: true
+    config:
+      strict_mode: true
+      confidence_threshold: 0.7
+
+  # Proxy variables are critical for hiring - detects indirect bias
+  - name: "proxy_variables"
+    enabled: true
+    blocking: true
+    config:
+      sensitivity: "high"
+      # Hiring-specific proxy variables to watch
+      additional_patterns:
+        culture_fit: ["culture fit", "not a good fit", "wouldn't fit in"]
+        school_prestige: ["top school", "elite university", "ivy league"]
+        name_based: ["unusual name", "hard to pronounce", "foreign name"]
+      decision_types:
+        - "hiring"
+        - "promotion"
+
+# Output generators
+outputs:
+  - name: "internal_audit"
+    enabled: true
+    config:
+      format: "compliance"
+      include_raw_responses: false
+
+  # Consumer explanation for candidate feedback
+  - name: "consumer_explanation"
+    enabled: true
+    config:
+      language_level: "standard"
+      include_appeal_info: true
+      include_feedback: true
+      max_factors: 5
+      redact_model_names: true
+
+# Thresholds
+thresholds:
+  min_confidence: 0.75
+  auto_approve_threshold: 0.95
+  auto_deny_threshold: 0.05
+
+# Safety settings
+require_all_strategies: false
+fail_open: false
+human_review_on_error: true
