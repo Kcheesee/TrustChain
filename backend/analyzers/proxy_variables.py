@@ -191,6 +191,36 @@ class ProxyVariablesAnalyzer(BaseAnalyzer):
             raise ValueError(f"sensitivity must be one of: {valid_sensitivities}")
         return True
 
+    def adjust_sensitivity(self, multiplier: float) -> None:
+        """
+        Adjust analyzer sensitivity based on learned feedback.
+
+        This is the Phase 3 learning hook - adjusts sensitivity level
+        based on false positive/negative rates from human feedback.
+
+        Args:
+            multiplier: Sensitivity multiplier (>1 = more sensitive, <1 = less sensitive)
+        """
+        old_sensitivity = self.sensitivity
+
+        # Convert multiplier to sensitivity level
+        if multiplier > 1.2:
+            self.sensitivity = "high"
+        elif multiplier < 0.8:
+            self.sensitivity = "low"
+        else:
+            self.sensitivity = "medium"
+
+        if old_sensitivity != self.sensitivity:
+            logger.info(
+                f"ProxyVariablesAnalyzer sensitivity adjusted: "
+                f"{old_sensitivity} -> {self.sensitivity} (multiplier: {multiplier:.2f})"
+            )
+
+    def get_sensitivity(self) -> str:
+        """Get current sensitivity level (for inspection/debugging)."""
+        return self.sensitivity
+
     def analyze(
         self,
         strategy_result: StrategyResult,

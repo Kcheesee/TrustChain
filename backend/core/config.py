@@ -13,7 +13,7 @@ Built with care by Kareem & Claude
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 import yaml
 import json
@@ -146,7 +146,7 @@ class TrustChainConfig:
     human_review_on_error: bool = True  # If True, errors trigger human review
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "TrustChainConfig":
+    def from_yaml(cls, path: Union[str, Path]) -> "TrustChainConfig":
         """
         Load configuration from a YAML file.
 
@@ -308,7 +308,7 @@ class TrustChainConfig:
             "human_review_on_error": self.human_review_on_error,
         }
 
-    def to_yaml(self, path: Optional[str | Path] = None) -> str:
+    def to_yaml(self, path: Optional[Union[str, Path]] = None) -> str:
         """
         Convert configuration to YAML string, optionally saving to file.
 

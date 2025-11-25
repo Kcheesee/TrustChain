@@ -157,6 +157,47 @@ class ProtectedAttributesAnalyzer(BaseAnalyzer):
                 raise ValueError("confidence_threshold must be between 0 and 1")
         return True
 
+    def adjust_sensitivity(self, multiplier: float) -> None:
+        """
+        Adjust analyzer sensitivity based on learned feedback.
+
+        This is the Phase 3 learning hook - adjusts confidence threshold
+        based on false positive/negative rates from human feedback.
+
+        Higher multiplier = more strict (lower threshold triggers more flags)
+        Lower multiplier = less strict (higher threshold, fewer flags)
+
+        Args:
+            multiplier: Sensitivity multiplier (>1 = stricter, <1 = more lenient)
+        """
+        old_threshold = self.confidence_threshold
+
+        # Inverse relationship: higher multiplier = lower threshold = more flags
+        # We clamp between 0.5 and 0.95 to prevent extremes
+        new_threshold = max(0.5, min(0.95, self.confidence_threshold / multiplier))
+        self.confidence_threshold = new_threshold
+
+        if abs(old_threshold - new_threshold) > 0.01:
+            logger.info(
+                f"ProtectedAttributesAnalyzer threshold adjusted: "
+                f"{old_threshold:.2f} -> {new_threshold:.2f} (multiplier: {multiplier:.2f})"
+            )
+
+        # Also adjust strict_mode based on multiplier
+        if multiplier > 1.3 and not self.strict_mode:
+            self.strict_mode = True
+            logger.info("ProtectedAttributesAnalyzer: strict_mode enabled due to high multiplier")
+        elif multiplier < 0.7 and self.strict_mode:
+            self.strict_mode = False
+            logger.info("ProtectedAttributesAnalyzer: strict_mode disabled due to low multiplier")
+
+    def get_sensitivity_settings(self) -> Dict[str, Any]:
+        """Get current sensitivity settings (for inspection/debugging)."""
+        return {
+            "confidence_threshold": self.confidence_threshold,
+            "strict_mode": self.strict_mode,
+        }
+
     def analyze(
         self,
         strategy_result: StrategyResult,

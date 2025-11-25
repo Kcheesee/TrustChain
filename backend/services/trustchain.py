@@ -17,6 +17,12 @@ Usage:
     )
     result = await tc.evaluate(case_id, input_data, context)
 
+    # With learned parameters (Phase 3)
+    from learning import LearningEngine, get_feedback_store
+    engine = LearningEngine(get_feedback_store())
+    params = engine.get_parameters("hiring")
+    tc = TrustChain.from_config("configs/hiring.yaml", learned_parameters=params)
+
 Built with care by Kareem & Claude
 """
 
@@ -70,7 +76,8 @@ class TrustChain:
         strategies: Optional[List[BaseStrategy]] = None,
         analyzers: Optional[List[BaseAnalyzer]] = None,
         outputs: Optional[List[BaseOutput]] = None,
-        providers: Optional[List[Any]] = None
+        providers: Optional[List[Any]] = None,
+        learned_parameters: Optional[Any] = None  # LearnedParameters from learning module
     ):
         """
         Initialize TrustChain service.
@@ -81,9 +88,11 @@ class TrustChain:
             analyzers: Direct list of analyzer instances
             outputs: Direct list of output generator instances
             providers: List of LLM provider instances
+            learned_parameters: LearnedParameters from feedback learning engine
         """
         self.config = config
         self.registry = get_registry()
+        self.learned_parameters = learned_parameters
 
         # Initialize components from config or direct injection
         if config:
@@ -97,19 +106,25 @@ class TrustChain:
 
         self.providers = providers or []
 
+        # Apply learned parameters if provided
+        if learned_parameters:
+            self._apply_learned_parameters(learned_parameters)
+
         logger.info(
             f"TrustChain initialized: "
             f"{len(self.strategies)} strategies, "
             f"{len(self.analyzers)} analyzers, "
             f"{len(self.outputs)} outputs, "
             f"{len(self.providers)} providers"
+            + (", with learned parameters" if learned_parameters else "")
         )
 
     @classmethod
     def from_config(
         cls,
         config_path: str,
-        providers: Optional[List[Any]] = None
+        providers: Optional[List[Any]] = None,
+        learned_parameters: Optional[Any] = None
     ) -> "TrustChain":
         """
         Create TrustChain instance from YAML config file.
@@ -117,6 +132,7 @@ class TrustChain:
         Args:
             config_path: Path to YAML configuration file
             providers: List of LLM provider instances
+            learned_parameters: LearnedParameters from feedback learning engine
 
         Returns:
             Configured TrustChain instance
@@ -132,7 +148,7 @@ class TrustChain:
                 else:
                     logger.error(error)
 
-        return cls(config=config, providers=providers)
+        return cls(config=config, providers=providers, learned_parameters=learned_parameters)
 
     @classmethod
     def from_dict(
@@ -190,6 +206,136 @@ class TrustChain:
             except ValueError as e:
                 logger.error(f"Failed to load output '{oc.name}': {e}")
         return outputs
+
+    def _apply_learned_parameters(self, params: Any) -> None:
+        """
+        Apply learned parameters to strategies and analyzers.
+
+        This is Phase 3 functionality - adjusts component behavior based
+        on patterns learned from human feedback.
+
+        Args:
+            params: LearnedParameters object from learning engine
+        """
+        if not params:
+            return
+
+        logger.info("Applying learned parameters from feedback...")
+
+        # Apply model weights to strategies that support it
+        if params.model_weights:
+            weight_dict = {mw.model_id: mw.weight for mw in params.model_weights}
+
+            for strategy in self.strategies:
+                if hasattr(strategy, 'set_model_weights'):
+                    strategy.set_model_weights(weight_dict)
+                    logger.debug(f"Applied model weights to strategy: {strategy.name}")
+                elif strategy.name == "multi_model_consensus":
+                    # Direct config update for multi-model consensus
+                    if hasattr(strategy, 'config') and strategy.config:
+                        if 'provider_weights' in strategy.config:
+                            for model_id, weight in weight_dict.items():
+                                # Match model_id to provider (e.g., "anthropic/claude-3" -> "anthropic")
+                                provider = model_id.split("/")[0] if "/" in model_id else model_id
+                                if provider in strategy.config['provider_weights']:
+                                    old_weight = strategy.config['provider_weights'][provider]
+                                    strategy.config['provider_weights'][provider] = weight
+                                    logger.debug(
+                                        f"Adjusted {provider} weight: {old_weight:.2f} -> {weight:.2f}"
+                                    )
+
+        # Apply analyzer tuning
+        if params.analyzer_tuning:
+            tuning_dict = {at.analyzer_name: at for at in params.analyzer_tuning}
+
+            for analyzer in self.analyzers:
+                if analyzer.name in tuning_dict:
+                    tuning = tuning_dict[analyzer.name]
+
+                    # Apply sensitivity multiplier if analyzer supports it
+                    if hasattr(analyzer, 'adjust_sensitivity'):
+                        analyzer.adjust_sensitivity(tuning.sensitivity_multiplier)
+                        logger.debug(
+                            f"Adjusted {analyzer.name} sensitivity: x{tuning.sensitivity_multiplier:.2f}"
+                        )
+                    elif hasattr(analyzer, 'config') and analyzer.config:
+                        # Direct config adjustment for sensitivity
+                        if 'sensitivity' in analyzer.config:
+                            # Convert multiplier to sensitivity level
+                            if tuning.sensitivity_multiplier > 1.2:
+                                analyzer.config['sensitivity'] = 'high'
+                            elif tuning.sensitivity_multiplier < 0.8:
+                                analyzer.config['sensitivity'] = 'low'
+                            else:
+                                analyzer.config['sensitivity'] = 'medium'
+                            logger.debug(
+                                f"Set {analyzer.name} sensitivity to {analyzer.config['sensitivity']}"
+                            )
+
+        # Store confidence calibration for use during evaluation
+        if params.confidence_calibration:
+            self._confidence_calibration = {
+                cc.reported_confidence: cc.actual_accuracy
+                for cc in params.confidence_calibration
+            }
+            logger.debug(f"Loaded confidence calibration with {len(self._confidence_calibration)} points")
+        else:
+            self._confidence_calibration = {}
+
+        logger.info(
+            f"Applied learned parameters: "
+            f"{len(params.model_weights)} model weights, "
+            f"{len(params.analyzer_tuning)} analyzer tunings, "
+            f"{len(params.confidence_calibration)} calibration points"
+        )
+
+    def _calibrate_confidence(self, reported_confidence: float) -> float:
+        """
+        Calibrate reported confidence based on learned accuracy.
+
+        Uses linear interpolation between known calibration points.
+
+        Args:
+            reported_confidence: The raw confidence from the model
+
+        Returns:
+            Calibrated confidence reflecting actual accuracy
+        """
+        if not hasattr(self, '_confidence_calibration') or not self._confidence_calibration:
+            return reported_confidence
+
+        # Find nearest calibration points
+        points = sorted(self._confidence_calibration.items())
+
+        if not points:
+            return reported_confidence
+
+        # Exact match
+        if reported_confidence in self._confidence_calibration:
+            return self._confidence_calibration[reported_confidence]
+
+        # Find surrounding points for interpolation
+        lower = None
+        upper = None
+
+        for conf, acc in points:
+            if conf <= reported_confidence:
+                lower = (conf, acc)
+            elif conf > reported_confidence and upper is None:
+                upper = (conf, acc)
+
+        # Edge cases
+        if lower is None:
+            return points[0][1]  # Below all points, use lowest
+        if upper is None:
+            return points[-1][1]  # Above all points, use highest
+
+        # Linear interpolation
+        lower_conf, lower_acc = lower
+        upper_conf, upper_acc = upper
+
+        ratio = (reported_confidence - lower_conf) / (upper_conf - lower_conf)
+        return lower_acc + ratio * (upper_acc - lower_acc)
 
     async def evaluate(
         self,

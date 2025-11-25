@@ -77,6 +77,34 @@ class MultiModelConsensusStrategy(BaseStrategy):
             f"confidence_weighting={self.use_confidence_weighting}"
         )
 
+    def set_model_weights(self, weights: Dict[str, float]) -> None:
+        """
+        Set model weights from learned parameters.
+
+        This is the Phase 3 learning hook - adjusts voting weights
+        based on individual model accuracy from human feedback.
+
+        Args:
+            weights: Dict mapping model_id/provider to weight
+        """
+        for model_id, weight in weights.items():
+            # Try exact match first
+            if model_id in self.provider_weights:
+                old_weight = self.provider_weights[model_id]
+                self.provider_weights[model_id] = weight
+                logger.info(f"Adjusted weight for {model_id}: {old_weight:.2f} -> {weight:.2f}")
+            else:
+                # Try matching by provider prefix (e.g., "anthropic/claude-3" -> "anthropic")
+                provider = model_id.split("/")[0] if "/" in model_id else model_id
+                if provider in self.provider_weights:
+                    old_weight = self.provider_weights[provider]
+                    self.provider_weights[provider] = weight
+                    logger.info(f"Adjusted weight for {provider}: {old_weight:.2f} -> {weight:.2f}")
+
+    def get_model_weights(self) -> Dict[str, float]:
+        """Get current model weights (for inspection/debugging)."""
+        return self.provider_weights.copy()
+
     def validate_config(self, config: Dict[str, Any]) -> bool:
         """Validate strategy configuration."""
         if "consensus_threshold" in config:

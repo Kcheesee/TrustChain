@@ -127,10 +127,20 @@ TrustChain/backend/
 │   └── multi_model_consensus.py
 │
 ├── analyzers/               # WHAT to check for
-│   └── protected_attributes.py
+│   ├── protected_attributes.py
+│   └── proxy_variables.py
 │
 ├── outputs/                 # WHO gets what format
-│   └── internal_audit.py
+│   ├── internal_audit.py
+│   └── consumer_explanation.py
+│
+├── feedback/                # Phase 3: Human feedback capture
+│   ├── capture.py           # HumanFeedback, ReviewerAction enums
+│   └── storage.py           # InMemory + SQLite stores
+│
+├── learning/                # Phase 3: Learning from feedback
+│   ├── engine.py            # LearningEngine, LearnedParameters
+│   └── safeguards.py        # LearningGuard, bad actor protection
 │
 ├── configs/                 # YAML configuration files
 │   ├── unemployment_benefits.yaml
@@ -138,7 +148,7 @@ TrustChain/backend/
 │   └── immigration.yaml
 │
 └── services/
-    ├── trustchain.py        # NEW: Main entry point
+    ├── trustchain.py        # Main entry point
     └── orchestrator.py      # Legacy (still supported)
 ```
 
@@ -189,6 +199,50 @@ Hard stops that override all other logic:
 - Life-altering decision type
 - Very low consensus (<50%)
 - Low consensus + bias indicators
+
+---
+
+## 🔄 Feedback & Learning System (Phase 3)
+
+TrustChain learns from human reviewers while protecting against bad actors:
+
+### Human Feedback Loop
+```
+AI Decision → Human Review → Feedback Captured → Learning Engine → Improved Weights
+```
+
+### Feedback Types
+- **AGREE**: Human confirms AI decision was correct
+- **OVERRIDE_TO_APPROVE**: Human overrides denial → approval
+- **OVERRIDE_TO_DENY**: Human overrides approval → denial
+- **ESCALATE**: Send to senior reviewer
+
+### Bad Actor Safeguards
+| Protection | Description |
+|------------|-------------|
+| **Reviewer Credibility** | Scored by real-world outcomes, not opinions |
+| **Anomaly Detection** | Flags unusual override patterns (>40% rate) |
+| **Outcome-Gated Learning** | Waits for reality (90 days) before trusting feedback |
+| **Influence Caps** | No single reviewer exceeds 15% of learning weight |
+| **Parameter Versioning** | Rollback capability if corruption detected |
+
+### Feedback API Endpoints
+```bash
+# Submit human feedback
+POST /api/v2/feedback
+
+# Record real-world outcome (ground truth)
+POST /api/v2/feedback/outcome
+
+# Trigger learning cycle
+POST /api/v2/learn
+
+# View safeguards report
+GET /api/v2/safeguards/report
+
+# Rollback to previous parameters
+POST /api/v2/safeguards/rollback/{version}
+```
 
 ---
 
@@ -460,7 +514,7 @@ python test_api.py
 - [x] Audit trail with hashing
 - [x] REST API with Swagger docs
 - [x] Test suite
-- [x] **Phase 1: Modular Plugin Architecture** (NEW!)
+- [x] **Phase 1: Modular Plugin Architecture**
   - [x] Core abstractions (BaseStrategy, BaseAnalyzer, BaseOutput)
   - [x] Plugin registry system
   - [x] YAML configuration loader
@@ -468,16 +522,26 @@ python test_api.py
   - [x] Multi-model consensus strategy
   - [x] Protected attributes analyzer
   - [x] Internal audit output generator
+- [x] **Phase 2: Additional Components**
+  - [x] Proxy variables analyzer
+  - [x] Consumer explanation output
+  - [x] Additional YAML configs (hiring, immigration)
+- [x] **Phase 3: Feedback & Learning System** (NEW!)
+  - [x] Human feedback capture (agree/override/escalate)
+  - [x] Feedback storage (in-memory + SQLite)
+  - [x] Learning engine (model weights, confidence calibration)
+  - [x] Bad actor safeguards (credibility scoring, anomaly detection)
+  - [x] Outcome-gated learning (reality > opinions)
+  - [x] Parameter versioning with rollback
+  - [x] 38 passing tests
 
 ### In Progress 🚧
 - [ ] PostgreSQL integration
 - [ ] Frontend dashboard (React)
 - [ ] JWT authentication
 
-### Planned 📅 (Phase 2-4)
+### Planned 📅 (Phase 4+)
 - [ ] Additional strategies (criteria decomposition, adversarial review)
-- [ ] Additional analyzers (proxy variables, reasoning quality)
-- [ ] Additional outputs (consumer explanation, compliance report)
 - [ ] WebSocket support (real-time updates)
 - [ ] LIME/SHAP explainability
 - [ ] Demographic blind testing

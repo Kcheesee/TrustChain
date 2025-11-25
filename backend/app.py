@@ -15,6 +15,21 @@ Endpoints:
     - GET /api/v2/components - List registered components
     - GET /api/v2/config/{config_name} - Load and validate config
 
+    v2 Feedback (Phase 3 - Learning System):
+    - POST /api/v2/feedback/submit - Submit human feedback on decisions
+    - GET /api/v2/feedback/stats - Get aggregate feedback statistics
+    - POST /api/v2/feedback/learn - Trigger learning cycle
+    - GET /api/v2/feedback/parameters - Get learned parameters
+    - POST /api/v2/feedback/outcome - Record long-term outcome
+    - GET /api/v2/feedback/{result_id} - Get feedback for specific result
+
+    v2 Safeguards (Bad Actor Protection):
+    - GET /api/v2/safeguards/report - Comprehensive safeguards report
+    - GET /api/v2/safeguards/reviewer/{id} - Reviewer credibility details
+    - POST /api/v2/safeguards/rollback/{version} - Roll back parameters
+    - POST /api/v2/safeguards/flag-reviewer/{id} - Flag bad actor
+    - POST /api/v2/safeguards/unflag-reviewer/{id} - Unflag reviewer
+
 Run with: uvicorn app:app --reload
 
 Built with care by Kareem & Claude
@@ -39,6 +54,17 @@ from models import DecisionRequest, DecisionResponse, DecisionStatus
 
 # Import core components to register them
 from core.registry import get_registry
+
+# Phase 3: Feedback and Learning System
+from feedback import (
+    HumanFeedback,
+    ReviewerAction,
+    OverrideReason,
+    FeedbackStats,
+    get_feedback_store,
+    FeedbackStore,
+)
+from learning import LearningEngine, LearnedParameters, LearningGuard
 import strategies  # noqa: F401 - Registers strategy components
 import analyzers  # noqa: F401 - Registers analyzer components
 import outputs  # noqa: F401 - Registers output components
@@ -56,6 +82,9 @@ logger = logging.getLogger(__name__)
 # Global service instances
 orchestrator: Optional[DecisionOrchestrator] = None
 trustchain_service: Optional[TrustChain] = None
+feedback_store: Optional[FeedbackStore] = None
+learning_engine: Optional[LearningEngine] = None
+learning_guard: Optional[LearningGuard] = None  # Bad actor protection
 
 # In-memory storage (will be replaced with database)
 decision_store: Dict[str, Any] = {}  # Legacy v1 decisions
@@ -77,6 +106,33 @@ class ConfigLoadRequest(BaseModel):
     config_name: str
 
 
+# Request models for Feedback API (Phase 3)
+class FeedbackSubmitRequest(BaseModel):
+    """Request model for submitting human feedback."""
+    result_id: str
+    case_id: str
+    reviewer_id: str
+    action: str  # ReviewerAction value
+    reasoning: Optional[str] = None
+    override_reason: Optional[str] = None  # OverrideReason value
+    incorrect_flags: Optional[List[str]] = None
+    missed_flags: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+
+class OutcomeRecordRequest(BaseModel):
+    """Request model for recording long-term outcome."""
+    result_id: str
+    outcome: str  # e.g., "successful_hire", "appeal_overturned", "complaint_filed"
+    outcome_details: Optional[Dict[str, Any]] = None
+
+
+class LearnRequest(BaseModel):
+    """Request model for triggering learning."""
+    decision_type: Optional[str] = None
+    force: bool = False  # Skip minimum feedback count check
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -85,7 +141,7 @@ async def lifespan(app: FastAPI):
     Initializes both legacy orchestrator and new TrustChain service on startup.
     This runs once when the server starts, not on every request.
     """
-    global orchestrator, trustchain_service
+    global orchestrator, trustchain_service, feedback_store, learning_engine
 
     logger.info("🚀 Starting TrustChain API...")
 
@@ -128,6 +184,29 @@ async def lifespan(app: FastAPI):
 
     # Initialize TrustChain service (v2 API) with providers from orchestrator
     trustchain_service = TrustChain(providers=orchestrator.providers)
+
+    # Phase 3: Initialize feedback store, safeguards, and learning engine
+    feedback_store = get_feedback_store()
+
+    # Initialize bad actor protection (LearningGuard)
+    learning_guard = LearningGuard(
+        max_reviewer_influence=float(os.getenv("MAX_REVIEWER_INFLUENCE", "0.15")),
+        outcome_wait_days=int(os.getenv("OUTCOME_WAIT_DAYS", "90")),
+        min_outcome_sample=int(os.getenv("MIN_OUTCOME_SAMPLE", "20")),
+        anomaly_override_threshold=float(os.getenv("ANOMALY_OVERRIDE_THRESHOLD", "0.4")),
+        min_credibility_for_learning=float(os.getenv("MIN_CREDIBILITY", "0.3")),
+        state_path=os.getenv("SAFEGUARD_STATE_PATH", "data/safeguards_state.json"),
+    )
+    logger.info("✓ LearningGuard initialized (bad actor protection)")
+
+    learning_engine = LearningEngine(
+        feedback_store=feedback_store,
+        learning_rate=float(os.getenv("LEARNING_RATE", "0.1")),
+        min_feedback_count=int(os.getenv("MIN_FEEDBACK_COUNT", "10")),
+        state_path=os.getenv("LEARNING_STATE_PATH", "data/learned_state.json"),
+        safeguard=learning_guard,  # Connect safeguards
+    )
+    logger.info("✓ Feedback store and learning engine initialized (with safeguards)")
 
     # Log registered components
     registry = get_registry()
@@ -691,6 +770,631 @@ Please evaluate this case and provide:
 2. Step-by-step reasoning
 3. Your confidence level (0-1)
 """
+
+
+# ============================================================================
+# V2 FEEDBACK API ENDPOINTS (Phase 3)
+# ============================================================================
+
+@app.post("/api/v2/feedback/submit", status_code=status.HTTP_201_CREATED)
+async def submit_feedback(request: FeedbackSubmitRequest):
+    """
+    Submit human feedback on a TrustChain decision.
+
+    This endpoint captures reviewer feedback when they agree with,
+    override, or escalate an AI-generated decision.
+
+    Args:
+        request: FeedbackSubmitRequest with reviewer action and reasoning
+
+    Returns:
+        Confirmation with feedback ID
+
+    Example:
+        POST /api/v2/feedback/submit
+        {
+            "result_id": "tc_abc123",
+            "case_id": "hire_456",
+            "reviewer_id": "jane_hr",
+            "action": "override_deny",
+            "reasoning": "Candidate has relevant experience not captured",
+            "override_reason": "context_not_captured"
+        }
+    """
+    if not feedback_store:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Feedback store not initialized"
+        )
+
+    logger.info(f"📝 Feedback submission: {request.result_id} by {request.reviewer_id}")
+
+    try:
+        # Validate action
+        try:
+            action = ReviewerAction(request.action)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid action. Valid values: {[a.value for a in ReviewerAction]}"
+            )
+
+        # Validate override_reason if provided
+        override_reason = None
+        if request.override_reason:
+            try:
+                override_reason = OverrideReason(request.override_reason)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid override_reason. Valid values: {[r.value for r in OverrideReason]}"
+                )
+
+        # Get original result for context
+        original_decision = None
+        original_confidence = None
+        model_decisions = None
+        if request.result_id in accountability_store:
+            result = accountability_store[request.result_id]
+            original_decision = result.final_decision.value
+            original_confidence = result.overall_confidence
+            # Extract model decisions if available
+            if hasattr(result, 'strategy_results'):
+                for sr in result.strategy_results:
+                    if hasattr(sr, 'model_responses'):
+                        model_decisions = {
+                            r.model_id: r.decision.value
+                            for r in sr.model_responses
+                            if hasattr(r, 'model_id') and hasattr(r, 'decision')
+                        }
+
+        # Create feedback object
+        feedback = HumanFeedback(
+            result_id=request.result_id,
+            case_id=request.case_id,
+            reviewer_id=request.reviewer_id,
+            action=action,
+            reasoning=request.reasoning,
+            override_reason=override_reason,
+            incorrect_flags=request.incorrect_flags,
+            missed_flags=request.missed_flags,
+            notes=request.notes,
+            original_decision=original_decision,
+            original_confidence=original_confidence,
+            model_decisions=model_decisions,
+        )
+
+        # Save to store
+        await feedback_store.save_feedback(feedback)
+
+        logger.info(f"✅ Feedback saved: {feedback.feedback_id}")
+
+        return {
+            "feedback_id": feedback.feedback_id,
+            "result_id": request.result_id,
+            "action": action.value,
+            "is_override": action.is_override,
+            "timestamp": feedback.timestamp.isoformat(),
+            "message": "Feedback recorded successfully",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Feedback submission failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save feedback: {str(e)}"
+        )
+
+
+@app.get("/api/v2/feedback/stats")
+async def get_feedback_stats(
+    decision_type: Optional[str] = None,
+    reviewer_id: Optional[str] = None,
+    days: int = Query(default=30, ge=1, le=365)
+):
+    """
+    Get aggregate feedback statistics.
+
+    Returns metrics on reviewer agreement, override rates, and patterns.
+
+    Query Parameters:
+        decision_type: Filter by decision type (hiring/unemployment_benefits/etc)
+        reviewer_id: Filter by specific reviewer
+        days: Number of days to include (default 30, max 365)
+
+    Returns:
+        FeedbackStats with aggregate metrics
+    """
+    if not feedback_store:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Feedback store not initialized"
+        )
+
+    try:
+        stats = await feedback_store.compute_stats(
+            decision_type=decision_type,
+            reviewer_id=reviewer_id,
+            days=days
+        )
+
+        return {
+            "stats": {
+                "total_feedback": stats.total_feedback,
+                "agreement_rate": stats.agreement_rate,
+                "override_rate": stats.override_rate,
+                "escalation_rate": stats.escalation_rate,
+                "override_reasons": stats.override_reasons,
+                "by_decision_type": stats.by_decision_type,
+                "by_reviewer": stats.by_reviewer,
+                "false_positive_rate": stats.false_positive_rate,
+                "false_negative_rate": stats.false_negative_rate,
+            },
+            "filters": {
+                "decision_type": decision_type,
+                "reviewer_id": reviewer_id,
+                "days": days,
+            },
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to compute stats: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to compute statistics: {str(e)}"
+        )
+
+
+@app.post("/api/v2/feedback/learn")
+async def trigger_learning(request: LearnRequest):
+    """
+    Trigger a learning cycle to update model weights and calibration.
+
+    This analyzes accumulated feedback and adjusts:
+    - Model weights based on individual accuracy
+    - Confidence calibration curves
+    - Analyzer sensitivity thresholds
+
+    Args:
+        request: LearnRequest with optional decision_type and force flag
+
+    Returns:
+        Learning results with before/after comparisons
+
+    Example:
+        POST /api/v2/feedback/learn
+        {
+            "decision_type": "hiring",
+            "force": false
+        }
+    """
+    if not learning_engine:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning engine not initialized"
+        )
+
+    logger.info(f"🧠 Learning cycle triggered (type={request.decision_type}, force={request.force})")
+
+    try:
+        results = await learning_engine.learn(
+            decision_type=request.decision_type,
+            force=request.force
+        )
+
+        logger.info(f"✅ Learning complete: {results.get('feedback_processed', 0)} feedback processed")
+
+        return {
+            "success": True,
+            "results": results,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Learning failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Learning cycle failed: {str(e)}"
+        )
+
+
+@app.get("/api/v2/feedback/parameters")
+async def get_learned_parameters(decision_type: Optional[str] = None):
+    """
+    Get current learned parameters.
+
+    Returns the parameters learned from feedback that can be applied
+    to TrustChain for improved accuracy.
+
+    Query Parameters:
+        decision_type: Filter parameters for specific decision type
+
+    Returns:
+        LearnedParameters with model weights, calibration, and tuning
+    """
+    if not learning_engine:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning engine not initialized"
+        )
+
+    try:
+        params = learning_engine.get_parameters(decision_type=decision_type)
+
+        return {
+            "parameters": {
+                "model_weights": [
+                    {
+                        "model_id": mw.model_id,
+                        "weight": mw.weight,
+                        "accuracy": mw.accuracy,
+                        "feedback_count": mw.feedback_count,
+                    }
+                    for mw in params.model_weights
+                ],
+                "confidence_calibration": [
+                    {
+                        "reported_confidence": cc.reported_confidence,
+                        "actual_accuracy": cc.actual_accuracy,
+                        "sample_count": cc.sample_count,
+                    }
+                    for cc in params.confidence_calibration
+                ],
+                "analyzer_tuning": [
+                    {
+                        "analyzer_name": at.analyzer_name,
+                        "sensitivity_multiplier": at.sensitivity_multiplier,
+                        "false_positive_rate": at.false_positive_rate,
+                        "false_negative_rate": at.false_negative_rate,
+                    }
+                    for at in params.analyzer_tuning
+                ],
+                "last_updated": params.last_updated.isoformat() if params.last_updated else None,
+                "feedback_count": params.feedback_count,
+            },
+            "decision_type": decision_type,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get parameters: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get parameters: {str(e)}"
+        )
+
+
+@app.post("/api/v2/feedback/outcome")
+async def record_outcome(request: OutcomeRecordRequest):
+    """
+    Record the long-term outcome of a decision.
+
+    This captures what actually happened after the decision was made,
+    enabling learning from real-world results.
+
+    Args:
+        request: OutcomeRecordRequest with outcome details
+
+    Returns:
+        Confirmation of outcome recording
+
+    Example:
+        POST /api/v2/feedback/outcome
+        {
+            "result_id": "tc_abc123",
+            "outcome": "successful_hire",
+            "outcome_details": {"performance_rating": 4.5, "retention_months": 12}
+        }
+    """
+    if not feedback_store:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Feedback store not initialized"
+        )
+
+    logger.info(f"📊 Outcome recording: {request.result_id} -> {request.outcome}")
+
+    try:
+        # Update feedback with outcome
+        await feedback_store.update_outcome(
+            result_id=request.result_id,
+            outcome=request.outcome,
+            outcome_details=request.outcome_details
+        )
+
+        logger.info(f"✅ Outcome recorded: {request.result_id}")
+
+        return {
+            "result_id": request.result_id,
+            "outcome": request.outcome,
+            "timestamp": datetime.now().isoformat(),
+            "message": "Outcome recorded successfully",
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Outcome recording failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to record outcome: {str(e)}"
+        )
+
+
+@app.get("/api/v2/feedback/{result_id}")
+async def get_feedback_for_result(result_id: str):
+    """
+    Get all feedback for a specific result.
+
+    Returns all feedback entries linked to a TrustChain result,
+    including any outcome data recorded later.
+
+    Args:
+        result_id: The TrustChain result ID
+
+    Returns:
+        List of feedback entries for this result
+    """
+    if not feedback_store:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Feedback store not initialized"
+        )
+
+    try:
+        feedback_list = await feedback_store.get_feedback(result_id=result_id)
+
+        return {
+            "result_id": result_id,
+            "feedback_count": len(feedback_list),
+            "feedback": [
+                {
+                    "feedback_id": f.feedback_id,
+                    "reviewer_id": f.reviewer_id,
+                    "action": f.action.value,
+                    "reasoning": f.reasoning,
+                    "override_reason": f.override_reason.value if f.override_reason else None,
+                    "timestamp": f.timestamp.isoformat(),
+                    "outcome": f.outcome,
+                    "outcome_recorded_at": f.outcome_recorded_at.isoformat() if f.outcome_recorded_at else None,
+                }
+                for f in feedback_list
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get feedback: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get feedback: {str(e)}"
+        )
+
+
+# ============================================================================
+# V2 SAFEGUARDS API ENDPOINTS (Bad Actor Protection)
+# ============================================================================
+
+@app.get("/api/v2/safeguards/report")
+async def get_safeguards_report():
+    """
+    Get comprehensive safeguards report.
+
+    Returns current state of bad actor protections including:
+    - Flagged reviewers and their anomalies
+    - Reviewer credibility scores
+    - Parameter version history
+    - Overall system health
+
+    Returns:
+        SafeguardsReport with all protection metrics
+    """
+    if not learning_guard:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning safeguards not initialized"
+        )
+
+    try:
+        report = learning_guard.get_safeguards_report()
+
+        return {
+            "safeguards": report,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get safeguards report: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get safeguards report: {str(e)}"
+        )
+
+
+@app.get("/api/v2/safeguards/reviewer/{reviewer_id}")
+async def get_reviewer_credibility(reviewer_id: str):
+    """
+    Get credibility details for a specific reviewer.
+
+    Returns outcome-based accuracy, override patterns, and any anomalies
+    detected for this reviewer.
+
+    Args:
+        reviewer_id: The reviewer's ID
+
+    Returns:
+        ReviewerCredibility details
+    """
+    if not learning_guard:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning safeguards not initialized"
+        )
+
+    try:
+        if reviewer_id not in learning_guard.reviewer_credibility:
+            return {
+                "reviewer_id": reviewer_id,
+                "status": "unknown",
+                "message": "No data for this reviewer yet",
+            }
+
+        cred = learning_guard.reviewer_credibility[reviewer_id]
+
+        return {
+            "reviewer": cred.to_dict(),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get reviewer credibility: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reviewer credibility: {str(e)}"
+        )
+
+
+@app.post("/api/v2/safeguards/rollback/{version}")
+async def rollback_parameters(version: int):
+    """
+    Roll back learned parameters to a previous version.
+
+    Use this if corruption is detected or parameters are performing poorly.
+
+    Args:
+        version: The version number to roll back to
+
+    Returns:
+        Confirmation and the restored parameters
+    """
+    if not learning_guard:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning safeguards not initialized"
+        )
+
+    try:
+        restored = learning_guard.rollback_to_version(version)
+
+        if restored is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Version {version} not found"
+            )
+
+        logger.warning(f"🔙 Parameters rolled back to version {version}")
+
+        return {
+            "status": "success",
+            "rolled_back_to": version,
+            "timestamp": datetime.now().isoformat(),
+            "message": f"Parameters rolled back to version {version}",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Rollback failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Rollback failed: {str(e)}"
+        )
+
+
+@app.post("/api/v2/safeguards/flag-reviewer/{reviewer_id}")
+async def flag_reviewer(reviewer_id: str, reason: str = Query(...)):
+    """
+    Manually flag a reviewer for exclusion from learning.
+
+    Use this if you identify a bad actor through external means.
+
+    Args:
+        reviewer_id: The reviewer to flag
+        reason: Why they're being flagged
+
+    Returns:
+        Confirmation of flagging
+    """
+    if not learning_guard:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning safeguards not initialized"
+        )
+
+    try:
+        if reviewer_id not in learning_guard.reviewer_credibility:
+            from learning import ReviewerCredibility
+            learning_guard.reviewer_credibility[reviewer_id] = ReviewerCredibility(
+                reviewer_id=reviewer_id
+            )
+
+        cred = learning_guard.reviewer_credibility[reviewer_id]
+        cred.flagged_for_review = True
+        cred.flag_reason = f"Manual flag: {reason}"
+
+        logger.warning(f"🚩 Reviewer {reviewer_id} manually flagged: {reason}")
+
+        return {
+            "status": "flagged",
+            "reviewer_id": reviewer_id,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to flag reviewer: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to flag reviewer: {str(e)}"
+        )
+
+
+@app.post("/api/v2/safeguards/unflag-reviewer/{reviewer_id}")
+async def unflag_reviewer(reviewer_id: str, reason: str = Query(...)):
+    """
+    Remove flag from a reviewer, allowing their feedback to be used again.
+
+    Args:
+        reviewer_id: The reviewer to unflag
+        reason: Why they're being unflagged
+
+    Returns:
+        Confirmation of unflagging
+    """
+    if not learning_guard:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Learning safeguards not initialized"
+        )
+
+    try:
+        if reviewer_id not in learning_guard.reviewer_credibility:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Reviewer {reviewer_id} not found"
+            )
+
+        cred = learning_guard.reviewer_credibility[reviewer_id]
+        cred.flagged_for_review = False
+        cred.flag_reason = ""
+
+        logger.info(f"✅ Reviewer {reviewer_id} unflagged: {reason}")
+
+        return {
+            "status": "unflagged",
+            "reviewer_id": reviewer_id,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to unflag reviewer: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to unflag reviewer: {str(e)}"
+        )
 
 
 # ============================================================================
