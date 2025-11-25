@@ -11,7 +11,12 @@ from database.models import (
     BiasAnalysis,
     AuditLog,
     ProviderHealth,
-    User
+    User,
+    # Phase 3: Feedback & Learning
+    HumanFeedback,
+    ReviewerCredibility,
+    ParameterVersion,
+    LearningRun,
 )
 
 from database.repositories import (
@@ -20,7 +25,12 @@ from database.repositories import (
     BiasAnalysisRepository,
     AuditLogRepository,
     ProviderHealthRepository,
-    UnitOfWork
+    # Phase 3: Feedback & Learning
+    HumanFeedbackRepository,
+    ReviewerCredibilityRepository,
+    ParameterVersionRepository,
+    LearningRunRepository,
+    UnitOfWork,
 )
 
 from database.connection import (
@@ -39,15 +49,25 @@ __all__ = [
     "AuditLog",
     "ProviderHealth",
     "User",
-    
+    # Phase 3: Feedback & Learning
+    "HumanFeedback",
+    "ReviewerCredibility",
+    "ParameterVersion",
+    "LearningRun",
+
     # Repositories
     "DecisionRepository",
     "ModelDecisionRepository",
     "BiasAnalysisRepository",
     "AuditLogRepository",
     "ProviderHealthRepository",
+    # Phase 3: Feedback & Learning
+    "HumanFeedbackRepository",
+    "ReviewerCredibilityRepository",
+    "ParameterVersionRepository",
+    "LearningRunRepository",
     "UnitOfWork",
-    
+
     # Connection
     "DatabaseManager",
     "init_database",

@@ -35,7 +35,9 @@ from .storage import (
     FeedbackStore,
     InMemoryFeedbackStore,
     SQLiteFeedbackStore,
+    PostgresFeedbackStore,
     get_feedback_store,
+    set_feedback_store,
 )
 
 __all__ = [
@@ -46,5 +48,7 @@ __all__ = [
     "FeedbackStore",
     "InMemoryFeedbackStore",
     "SQLiteFeedbackStore",
+    "PostgresFeedbackStore",
     "get_feedback_store",
+    "set_feedback_store",
 ]

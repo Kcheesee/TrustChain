@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_, or_
 
 from database.models import (
-    Decision, ModelDecision, BiasAnalysis, AuditLog, ProviderHealth
+    Decision, ModelDecision, BiasAnalysis, AuditLog, ProviderHealth,
+    HumanFeedback, ReviewerCredibility, ParameterVersion, LearningRun
 )
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,274 @@ class ProviderHealthRepository:
         return latest_health
 
 
+# ============================================================================
+# Phase 3: Feedback & Learning Repositories
+# ============================================================================
+
+class HumanFeedbackRepository:
+    """Repository for human feedback operations."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create(self, feedback_data: Dict[str, Any]) -> HumanFeedback:
+        """Create human feedback record."""
+        feedback = HumanFeedback(**feedback_data)
+        self.session.add(feedback)
+        self.session.commit()
+        self.session.refresh(feedback)
+
+        logger.info(f"Created feedback: {feedback.feedback_id}")
+        return feedback
+
+    def get_by_id(self, feedback_id: str) -> Optional[HumanFeedback]:
+        """Get feedback by ID."""
+        return self.session.query(HumanFeedback).filter(
+            HumanFeedback.feedback_id == feedback_id
+        ).first()
+
+    def get_by_result_id(self, result_id: str) -> Optional[HumanFeedback]:
+        """Get feedback for a TrustChain result."""
+        return self.session.query(HumanFeedback).filter(
+            HumanFeedback.result_id == result_id
+        ).first()
+
+    def list_by_reviewer(
+        self,
+        reviewer_id: str,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[HumanFeedback]:
+        """List feedback by reviewer."""
+        return self.session.query(HumanFeedback).filter(
+            HumanFeedback.reviewer_id == reviewer_id
+        ).order_by(desc(HumanFeedback.created_at)).limit(limit).offset(offset).all()
+
+    def list_overrides(self, limit: int = 100) -> List[HumanFeedback]:
+        """List feedback with overrides."""
+        override_actions = ['OVERRIDE_TO_APPROVE', 'OVERRIDE_TO_DENY']
+        return self.session.query(HumanFeedback).filter(
+            HumanFeedback.action.in_(override_actions)
+        ).order_by(desc(HumanFeedback.created_at)).limit(limit).all()
+
+    def update_outcome(
+        self,
+        result_id: str,
+        outcome: str,
+        notes: str = ""
+    ) -> Optional[HumanFeedback]:
+        """Update feedback with outcome."""
+        feedback = self.get_by_result_id(result_id)
+        if feedback:
+            feedback.outcome = outcome
+            feedback.outcome_recorded_at = datetime.now()
+            if notes:
+                feedback.notes = (feedback.notes or "") + f"\n\nOutcome: {notes}"
+            self.session.commit()
+            self.session.refresh(feedback)
+        return feedback
+
+    def count_by_reviewer(self, reviewer_id: str) -> Dict[str, int]:
+        """Count feedback stats for a reviewer."""
+        total = self.session.query(HumanFeedback).filter(
+            HumanFeedback.reviewer_id == reviewer_id
+        ).count()
+
+        overrides = self.session.query(HumanFeedback).filter(
+            HumanFeedback.reviewer_id == reviewer_id,
+            HumanFeedback.action.in_(['OVERRIDE_TO_APPROVE', 'OVERRIDE_TO_DENY'])
+        ).count()
+
+        return {"total": total, "overrides": overrides}
+
+
+class ReviewerCredibilityRepository:
+    """Repository for reviewer credibility tracking."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def get_or_create(self, reviewer_id: str) -> ReviewerCredibility:
+        """Get or create reviewer credibility record."""
+        cred = self.session.query(ReviewerCredibility).filter(
+            ReviewerCredibility.reviewer_id == reviewer_id
+        ).first()
+
+        if not cred:
+            cred = ReviewerCredibility(reviewer_id=reviewer_id)
+            self.session.add(cred)
+            self.session.commit()
+            self.session.refresh(cred)
+            logger.info(f"Created credibility record for reviewer: {reviewer_id}")
+
+        return cred
+
+    def update_score(
+        self,
+        reviewer_id: str,
+        new_score: float,
+        correct_decision: bool = None
+    ) -> ReviewerCredibility:
+        """Update credibility score."""
+        cred = self.get_or_create(reviewer_id)
+
+        cred.credibility_score = max(0.0, min(1.0, new_score))
+        cred.last_review_at = datetime.now()
+
+        if correct_decision is not None:
+            cred.outcomes_recorded += 1
+            if correct_decision:
+                cred.correct_decisions += 1
+
+        self.session.commit()
+        self.session.refresh(cred)
+        return cred
+
+    def increment_review(self, reviewer_id: str, was_override: bool) -> ReviewerCredibility:
+        """Increment review counts."""
+        cred = self.get_or_create(reviewer_id)
+
+        cred.total_reviews += 1
+        if was_override:
+            cred.total_overrides += 1
+        cred.last_review_at = datetime.now()
+
+        self.session.commit()
+        self.session.refresh(cred)
+        return cred
+
+    def flag_reviewer(self, reviewer_id: str, reason: str) -> ReviewerCredibility:
+        """Flag a reviewer for anomalous behavior."""
+        cred = self.get_or_create(reviewer_id)
+
+        cred.flagged = True
+        cred.flag_reason = reason
+        cred.flagged_at = datetime.now()
+
+        self.session.commit()
+        self.session.refresh(cred)
+
+        logger.warning(f"Flagged reviewer {reviewer_id}: {reason}")
+        return cred
+
+    def unflag_reviewer(self, reviewer_id: str) -> ReviewerCredibility:
+        """Remove flag from reviewer."""
+        cred = self.get_or_create(reviewer_id)
+
+        cred.flagged = False
+        cred.flag_reason = None
+        cred.flagged_at = None
+
+        self.session.commit()
+        self.session.refresh(cred)
+        return cred
+
+    def list_flagged(self) -> List[ReviewerCredibility]:
+        """List all flagged reviewers."""
+        return self.session.query(ReviewerCredibility).filter(
+            ReviewerCredibility.flagged == True
+        ).all()
+
+    def list_all(self, limit: int = 100) -> List[ReviewerCredibility]:
+        """List all reviewer credibility records."""
+        return self.session.query(ReviewerCredibility).order_by(
+            desc(ReviewerCredibility.total_reviews)
+        ).limit(limit).all()
+
+
+class ParameterVersionRepository:
+    """Repository for versioned learning parameters."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create(self, params_data: Dict[str, Any]) -> ParameterVersion:
+        """Create a new parameter version."""
+        # Get next version number
+        latest = self.get_latest()
+        next_version = (latest.version + 1) if latest else 1
+
+        params = ParameterVersion(
+            version=next_version,
+            **params_data
+        )
+        self.session.add(params)
+        self.session.commit()
+        self.session.refresh(params)
+
+        logger.info(f"Created parameter version {next_version}")
+        return params
+
+    def get_latest(self) -> Optional[ParameterVersion]:
+        """Get the latest parameter version."""
+        return self.session.query(ParameterVersion).order_by(
+            desc(ParameterVersion.version)
+        ).first()
+
+    def get_by_version(self, version: int) -> Optional[ParameterVersion]:
+        """Get parameters by version number."""
+        return self.session.query(ParameterVersion).filter(
+            ParameterVersion.version == version
+        ).first()
+
+    def list_all(self, limit: int = 50) -> List[ParameterVersion]:
+        """List all parameter versions."""
+        return self.session.query(ParameterVersion).order_by(
+            desc(ParameterVersion.version)
+        ).limit(limit).all()
+
+
+class LearningRunRepository:
+    """Repository for learning run audit trail."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create(self, run_data: Dict[str, Any]) -> LearningRun:
+        """Create a new learning run record."""
+        run = LearningRun(**run_data)
+        self.session.add(run)
+        self.session.commit()
+        self.session.refresh(run)
+
+        logger.info(f"Created learning run: {run.run_id}")
+        return run
+
+    def update_status(
+        self,
+        run_id: str,
+        status: str,
+        error_message: str = None
+    ) -> Optional[LearningRun]:
+        """Update learning run status."""
+        run = self.session.query(LearningRun).filter(
+            LearningRun.run_id == run_id
+        ).first()
+
+        if run:
+            run.status = status
+            if error_message:
+                run.error_message = error_message
+            if status in ['completed', 'failed', 'rolled_back']:
+                run.completed_at = datetime.now()
+            self.session.commit()
+            self.session.refresh(run)
+
+        return run
+
+    def get_by_id(self, run_id: str) -> Optional[LearningRun]:
+        """Get learning run by ID."""
+        return self.session.query(LearningRun).filter(
+            LearningRun.run_id == run_id
+        ).first()
+
+    def list_recent(self, limit: int = 20) -> List[LearningRun]:
+        """List recent learning runs."""
+        return self.session.query(LearningRun).order_by(
+            desc(LearningRun.started_at)
+        ).limit(limit).all()
+
+
 # Convenience class to group all repositories
 
 class UnitOfWork:
@@ -307,6 +576,11 @@ class UnitOfWork:
         self.bias_analyses = BiasAnalysisRepository(session)
         self.audit_logs = AuditLogRepository(session)
         self.provider_health = ProviderHealthRepository(session)
+        # Phase 3: Feedback & Learning
+        self.human_feedback = HumanFeedbackRepository(session)
+        self.reviewer_credibility = ReviewerCredibilityRepository(session)
+        self.parameter_versions = ParameterVersionRepository(session)
+        self.learning_runs = LearningRunRepository(session)
     
     def commit(self):
         """Commit all changes."""

@@ -210,3 +210,139 @@ class User(Base):
     
     def __repr__(self):
         return f"<User(username={self.username}, role={self.role})>"
+
+
+# ============================================================================
+# Phase 3: Feedback & Learning Models
+# ============================================================================
+
+class HumanFeedback(Base):
+    """Human reviewer feedback on AI decisions."""
+    __tablename__ = "human_feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    feedback_id = Column(String(255), unique=True, nullable=False, index=True)
+    result_id = Column(String(255), nullable=False, index=True)  # Links to TrustChain result
+
+    # Reviewer info
+    reviewer_id = Column(String(255), nullable=False, index=True)
+
+    # Action taken
+    action = Column(String(50), nullable=False, index=True)  # AGREE, OVERRIDE_TO_APPROVE, OVERRIDE_TO_DENY, ESCALATE
+    original_decision = Column(String(50), nullable=False)
+    final_decision = Column(String(50), nullable=False)
+
+    # Override details (nullable if action is AGREE)
+    override_reason = Column(String(100))
+    confidence_adjustment = Column(Float)
+
+    # Context
+    decision_type = Column(String(100), index=True)
+    notes = Column(Text)
+
+    # Outcome tracking (filled in later when real-world outcome known)
+    outcome = Column(String(50))  # CORRECT, INCORRECT, UNKNOWN
+    outcome_recorded_at = Column(TIMESTAMP)
+
+    # Timestamps
+    created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), index=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('AGREE', 'OVERRIDE_TO_APPROVE', 'OVERRIDE_TO_DENY', 'ESCALATE')",
+            name='valid_action'
+        ),
+    )
+
+    def __repr__(self):
+        return f"<HumanFeedback(id={self.feedback_id}, action={self.action}, reviewer={self.reviewer_id})>"
+
+
+class ReviewerCredibility(Base):
+    """Tracks reviewer credibility based on outcomes."""
+    __tablename__ = "reviewer_credibility"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reviewer_id = Column(String(255), unique=True, nullable=False, index=True)
+
+    # Review counts
+    total_reviews = Column(Integer, nullable=False, default=0)
+    total_overrides = Column(Integer, nullable=False, default=0)
+
+    # Outcome tracking
+    outcomes_recorded = Column(Integer, nullable=False, default=0)
+    correct_decisions = Column(Integer, nullable=False, default=0)
+
+    # Credibility score (0.0 - 1.0, based on outcomes)
+    credibility_score = Column(Float, nullable=False, default=0.5)
+
+    # Anomaly tracking
+    flagged = Column(Boolean, nullable=False, default=False, index=True)
+    flag_reason = Column(String(255))
+    flagged_at = Column(TIMESTAMP)
+
+    # Timestamps
+    first_review_at = Column(TIMESTAMP, server_default=func.now())
+    last_review_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint('credibility_score >= 0 AND credibility_score <= 1', name='valid_credibility'),
+    )
+
+    def __repr__(self):
+        return f"<ReviewerCredibility(reviewer={self.reviewer_id}, score={self.credibility_score:.2f}, flagged={self.flagged})>"
+
+
+class ParameterVersion(Base):
+    """Versioned learning parameters for rollback capability."""
+    __tablename__ = "parameter_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    version = Column(Integer, nullable=False, unique=True, index=True)
+
+    # Parameters (stored as JSON)
+    model_weights = Column(JSON)
+    confidence_adjustments = Column(JSON)
+    analyzer_sensitivity = Column(JSON)
+
+    # Metadata
+    feedback_count = Column(Integer, nullable=False, default=0)
+    notes = Column(Text)
+
+    # Corruption detection
+    checksum = Column(String(64))
+
+    # Timestamps
+    created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), index=True)
+
+    def __repr__(self):
+        return f"<ParameterVersion(version={self.version}, feedback_count={self.feedback_count})>"
+
+
+class LearningRun(Base):
+    """Audit trail for learning cycles."""
+    __tablename__ = "learning_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(255), unique=True, nullable=False, index=True)
+
+    # Run details
+    feedback_processed = Column(Integer, nullable=False, default=0)
+    reviewers_included = Column(Integer, nullable=False, default=0)
+    reviewers_excluded = Column(Integer, nullable=False, default=0)
+
+    # Results
+    parameter_version_before = Column(Integer)
+    parameter_version_after = Column(Integer)
+
+    # Status
+    status = Column(String(50), nullable=False, default="running", index=True)  # running, completed, failed, rolled_back
+    error_message = Column(Text)
+
+    # Timestamps
+    started_at = Column(TIMESTAMP, nullable=False, server_default=func.now())
+    completed_at = Column(TIMESTAMP)
+
+    def __repr__(self):
+        return f"<LearningRun(id={self.run_id}, status={self.status}, feedback={self.feedback_processed})>"

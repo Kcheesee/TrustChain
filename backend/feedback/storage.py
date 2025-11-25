@@ -4,7 +4,7 @@ Feedback Storage Module for TrustChain.
 Provides persistent storage for human feedback with multiple backends:
 - InMemoryFeedbackStore: For testing
 - SQLiteFeedbackStore: For local development
-- (Future) PostgresFeedbackStore: For production
+- PostgresFeedbackStore: For production
 
 Built with care by Kareem & Claude
 """
@@ -13,11 +13,14 @@ import logging
 import sqlite3
 import json
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from .capture import HumanFeedback, FeedbackStats, ReviewerAction, OverrideReason
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -626,3 +629,285 @@ class SQLiteFeedbackStore(FeedbackStore):
         conn.close()
 
         return count
+
+
+class PostgresFeedbackStore(FeedbackStore):
+    """
+    PostgreSQL implementation for production.
+
+    Uses SQLAlchemy ORM for database operations.
+    Thread-safe and supports connection pooling.
+    """
+
+    def __init__(self, session_factory):
+        """
+        Initialize with SQLAlchemy session factory.
+
+        Args:
+            session_factory: Callable that returns a new Session
+        """
+        self._session_factory = session_factory
+        logger.info("PostgresFeedbackStore initialized")
+
+    def _get_session(self) -> "Session":
+        """Get a new database session."""
+        return self._session_factory()
+
+    def _feedback_to_model(self, feedback: HumanFeedback):
+        """Convert HumanFeedback dataclass to SQLAlchemy model."""
+        # Import here to avoid circular imports
+        from database.models import HumanFeedback as HumanFeedbackModel
+
+        return HumanFeedbackModel(
+            feedback_id=feedback.feedback_id,
+            result_id=feedback.result_id,
+            reviewer_id=feedback.reviewer_id,
+            action=feedback.action.value,
+            original_decision=feedback.original_decision,
+            final_decision=feedback.final_decision,
+            override_reason=feedback.override_reason.value if feedback.override_reason else None,
+            confidence_adjustment=feedback.confidence_adjustment,
+            decision_type=getattr(feedback, 'decision_type', None),
+            notes=feedback.reasoning,
+            created_at=feedback.timestamp,
+        )
+
+    def _model_to_feedback(self, model) -> HumanFeedback:
+        """Convert SQLAlchemy model to HumanFeedback dataclass."""
+        return HumanFeedback(
+            feedback_id=model.feedback_id,
+            result_id=model.result_id,
+            case_id=model.result_id,  # Use result_id as case_id for now
+            reviewer_id=model.reviewer_id,
+            action=ReviewerAction(model.action),
+            override_reason=OverrideReason(model.override_reason) if model.override_reason else None,
+            reasoning=model.notes or "",
+            timestamp=model.created_at,
+            original_decision=model.original_decision,
+            final_decision=model.final_decision,
+            confidence_adjustment=model.confidence_adjustment,
+            outcome_tracked=model.outcome is not None,
+            final_outcome=model.outcome,
+            outcome_timestamp=model.outcome_recorded_at,
+        )
+
+    async def save_feedback(self, feedback: HumanFeedback) -> str:
+        """Save feedback to PostgreSQL."""
+        session = self._get_session()
+        try:
+            model = self._feedback_to_model(feedback)
+            session.add(model)
+            session.commit()
+            logger.debug(f"Saved feedback {feedback.feedback_id}")
+            return feedback.feedback_id
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error saving feedback: {e}")
+            raise
+        finally:
+            session.close()
+
+    async def get_feedback(self, feedback_id: str) -> Optional[HumanFeedback]:
+        """Get feedback by ID."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+
+        session = self._get_session()
+        try:
+            model = session.query(HumanFeedbackModel).filter(
+                HumanFeedbackModel.feedback_id == feedback_id
+            ).first()
+
+            if model:
+                return self._model_to_feedback(model)
+            return None
+        finally:
+            session.close()
+
+    async def get_feedback_for_result(self, result_id: str) -> Optional[HumanFeedback]:
+        """Get feedback for a TrustChain result."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+
+        session = self._get_session()
+        try:
+            model = session.query(HumanFeedbackModel).filter(
+                HumanFeedbackModel.result_id == result_id
+            ).first()
+
+            if model:
+                return self._model_to_feedback(model)
+            return None
+        finally:
+            session.close()
+
+    async def get_feedback_batch(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        decision_type: Optional[str] = None,
+        reviewer_id: Optional[str] = None,
+        action: Optional[ReviewerAction] = None,
+        limit: int = 1000,
+        offset: int = 0
+    ) -> List[HumanFeedback]:
+        """Query feedback with filters."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+        from sqlalchemy import desc
+
+        session = self._get_session()
+        try:
+            query = session.query(HumanFeedbackModel)
+
+            if start_date:
+                query = query.filter(HumanFeedbackModel.created_at >= start_date)
+            if end_date:
+                query = query.filter(HumanFeedbackModel.created_at <= end_date)
+            if decision_type:
+                query = query.filter(HumanFeedbackModel.decision_type == decision_type)
+            if reviewer_id:
+                query = query.filter(HumanFeedbackModel.reviewer_id == reviewer_id)
+            if action:
+                query = query.filter(HumanFeedbackModel.action == action.value)
+
+            query = query.order_by(desc(HumanFeedbackModel.created_at))
+            query = query.limit(limit).offset(offset)
+
+            models = query.all()
+            return [self._model_to_feedback(m) for m in models]
+        finally:
+            session.close()
+
+    async def compute_stats(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        decision_type: Optional[str] = None
+    ) -> FeedbackStats:
+        """Compute aggregate statistics using SQL."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+        from sqlalchemy import func
+
+        session = self._get_session()
+        try:
+            stats = FeedbackStats(
+                period_start=start_date,
+                period_end=end_date or datetime.now()
+            )
+
+            # Base query with filters
+            query = session.query(HumanFeedbackModel)
+            if start_date:
+                query = query.filter(HumanFeedbackModel.created_at >= start_date)
+            if end_date:
+                query = query.filter(HumanFeedbackModel.created_at <= end_date)
+            if decision_type:
+                query = query.filter(HumanFeedbackModel.decision_type == decision_type)
+
+            # Total count
+            stats.total_reviewed = query.count()
+
+            if stats.total_reviewed == 0:
+                return stats
+
+            # Agreement count
+            agreement_actions = [
+                ReviewerAction.AGREE_APPROVE.value,
+                ReviewerAction.AGREE_DENY.value,
+                ReviewerAction.AGREE_FLAG.value,
+            ]
+            agreements = query.filter(
+                HumanFeedbackModel.action.in_(agreement_actions)
+            ).count()
+
+            # Override count
+            override_actions = [
+                ReviewerAction.OVERRIDE_TO_APPROVE.value,
+                ReviewerAction.OVERRIDE_TO_DENY.value,
+            ]
+            overrides = query.filter(
+                HumanFeedbackModel.action.in_(override_actions)
+            ).count()
+
+            stats.total_overrides = overrides
+            stats.agreement_rate = agreements / stats.total_reviewed
+            stats.override_rate = overrides / stats.total_reviewed
+
+            # Override reasons
+            reason_counts = session.query(
+                HumanFeedbackModel.override_reason,
+                func.count(HumanFeedbackModel.id)
+            ).filter(
+                HumanFeedbackModel.override_reason.isnot(None)
+            )
+            if start_date:
+                reason_counts = reason_counts.filter(HumanFeedbackModel.created_at >= start_date)
+            if end_date:
+                reason_counts = reason_counts.filter(HumanFeedbackModel.created_at <= end_date)
+
+            reason_counts = reason_counts.group_by(HumanFeedbackModel.override_reason).all()
+            for reason, count in reason_counts:
+                if reason:
+                    stats.override_reasons[reason] = count
+
+            # Outcome tracking
+            stats.outcomes_tracked = query.filter(
+                HumanFeedbackModel.outcome.isnot(None)
+            ).count()
+
+            return stats
+        finally:
+            session.close()
+
+    async def update_outcome(
+        self,
+        result_id: str,
+        final_outcome: str,
+        outcome_timestamp: datetime,
+        notes: str = ""
+    ) -> bool:
+        """Update feedback with final outcome."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+
+        session = self._get_session()
+        try:
+            model = session.query(HumanFeedbackModel).filter(
+                HumanFeedbackModel.result_id == result_id
+            ).first()
+
+            if model:
+                model.outcome = final_outcome
+                model.outcome_recorded_at = outcome_timestamp
+                if notes:
+                    model.notes = (model.notes or "") + f"\n\nOutcome: {notes}"
+                session.commit()
+                return True
+            return False
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating outcome: {e}")
+            raise
+        finally:
+            session.close()
+
+    async def count(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        decision_type: Optional[str] = None
+    ) -> int:
+        """Count matching feedback entries."""
+        from database.models import HumanFeedback as HumanFeedbackModel
+
+        session = self._get_session()
+        try:
+            query = session.query(HumanFeedbackModel)
+
+            if start_date:
+                query = query.filter(HumanFeedbackModel.created_at >= start_date)
+            if end_date:
+                query = query.filter(HumanFeedbackModel.created_at <= end_date)
+            if decision_type:
+                query = query.filter(HumanFeedbackModel.decision_type == decision_type)
+
+            return query.count()
+        finally:
+            session.close()

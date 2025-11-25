@@ -62,9 +62,14 @@ from feedback import (
     OverrideReason,
     FeedbackStats,
     get_feedback_store,
+    set_feedback_store,
     FeedbackStore,
+    PostgresFeedbackStore,
 )
 from learning import LearningEngine, LearnedParameters, LearningGuard
+
+# Phase 4: Database Integration
+from database import init_database, get_db_manager
 import strategies  # noqa: F401 - Registers strategy components
 import analyzers  # noqa: F401 - Registers analyzer components
 import outputs  # noqa: F401 - Registers output components
@@ -141,9 +146,21 @@ async def lifespan(app: FastAPI):
     Initializes both legacy orchestrator and new TrustChain service on startup.
     This runs once when the server starts, not on every request.
     """
-    global orchestrator, trustchain_service, feedback_store, learning_engine
+    global orchestrator, trustchain_service, feedback_store, learning_engine, learning_guard
 
     logger.info("🚀 Starting TrustChain API...")
+
+    # Phase 4: Initialize PostgreSQL database if DATABASE_URL is set
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        try:
+            db_manager = init_database(database_url, echo=os.getenv("DB_ECHO", "false").lower() == "true")
+            db_manager.init_db()  # Create tables
+            logger.info("✓ PostgreSQL database connected and initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            logger.warning("Falling back to SQLite for feedback storage")
+            database_url = None
 
     # Initialize AI provider configurations
     anthropic_config = None
@@ -186,7 +203,18 @@ async def lifespan(app: FastAPI):
     trustchain_service = TrustChain(providers=orchestrator.providers)
 
     # Phase 3: Initialize feedback store, safeguards, and learning engine
-    feedback_store = get_feedback_store()
+    # Use PostgreSQL if DATABASE_URL is configured, otherwise default to SQLite
+    if database_url:
+        try:
+            db_manager = get_db_manager()
+            feedback_store = PostgresFeedbackStore(db_manager.get_session_direct)
+            set_feedback_store(feedback_store)
+            logger.info("✓ Using PostgreSQL for feedback storage")
+        except Exception as e:
+            logger.warning(f"Failed to create PostgresFeedbackStore: {e}")
+            feedback_store = get_feedback_store()  # Fallback to SQLite
+    else:
+        feedback_store = get_feedback_store()  # Default SQLite
 
     # Initialize bad actor protection (LearningGuard)
     learning_guard = LearningGuard(
