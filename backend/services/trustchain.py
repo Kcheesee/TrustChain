@@ -77,7 +77,8 @@ class TrustChain:
         analyzers: Optional[List[BaseAnalyzer]] = None,
         outputs: Optional[List[BaseOutput]] = None,
         providers: Optional[List[Any]] = None,
-        learned_parameters: Optional[Any] = None  # LearnedParameters from learning module
+        learned_parameters: Optional[Any] = None,  # LearnedParameters from learning module
+        enable_counterfactual_testing: bool = False  # Phase 5: Counterfactual fairness
     ):
         """
         Initialize TrustChain service.
@@ -89,10 +90,12 @@ class TrustChain:
             outputs: Direct list of output generator instances
             providers: List of LLM provider instances
             learned_parameters: LearnedParameters from feedback learning engine
+            enable_counterfactual_testing: If True, adds CounterfactualFairnessAnalyzer
         """
         self.config = config
         self.registry = get_registry()
         self.learned_parameters = learned_parameters
+        self.enable_counterfactual_testing = enable_counterfactual_testing
 
         # Initialize components from config or direct injection
         if config:
@@ -110,6 +113,14 @@ class TrustChain:
         if learned_parameters:
             self._apply_learned_parameters(learned_parameters)
 
+        # Phase 5: Add counterfactual testing analyzer if enabled
+        if enable_counterfactual_testing:
+            from analyzers.counterfactual_fairness import CounterfactualFairnessAnalyzer
+            cf_analyzer = CounterfactualFairnessAnalyzer()
+            cf_analyzer._blocking = True  # Bias detection blocks automated decisions
+            self.analyzers.append(cf_analyzer)
+            logger.info("Counterfactual fairness testing enabled")
+
         logger.info(
             f"TrustChain initialized: "
             f"{len(self.strategies)} strategies, "
@@ -117,6 +128,7 @@ class TrustChain:
             f"{len(self.outputs)} outputs, "
             f"{len(self.providers)} providers"
             + (", with learned parameters" if learned_parameters else "")
+            + (", with counterfactual testing" if enable_counterfactual_testing else "")
         )
 
     @classmethod
@@ -342,14 +354,15 @@ class TrustChain:
         case_id: str,
         input_data: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        skip_analyzers: bool = False  # Phase 5: Skip analyzers for counterfactual re-runs
     ) -> AccountabilityResult:
         """
         Run full TrustChain evaluation.
 
         This is the main entry point for evaluating a case. It:
         1. Runs all configured evaluation strategies
-        2. Runs all configured analyzers on the results
+        2. Runs all configured analyzers on the results (unless skip_analyzers=True)
         3. Determines the final decision based on thresholds
         4. Generates all configured outputs
         5. Returns a complete AccountabilityResult
@@ -360,6 +373,8 @@ class TrustChain:
             context: Policy context, criteria, etc.
             dry_run: If True, validate config and return expected execution
                      without calling LLM providers (saves API costs)
+            skip_analyzers: If True, skip running analyzers (used for counterfactual
+                           re-runs to avoid infinite recursion)
 
         Returns:
             Complete AccountabilityResult with decision, analysis, and audit trail
@@ -371,7 +386,8 @@ class TrustChain:
         if dry_run:
             return await self._dry_run_evaluate(result_id, case_id, input_data, context)
 
-        logger.info(f"Starting TrustChain evaluation: {result_id} for case {case_id}")
+        logger.info(f"Starting TrustChain evaluation: {result_id} for case {case_id}"
+                    + (" (skip_analyzers=True)" if skip_analyzers else ""))
 
         # Initialize result
         result = AccountabilityResult(
@@ -398,9 +414,12 @@ class TrustChain:
             result.primary_reasoning = result.strategy_result.reasoning
             result.overall_confidence = result.strategy_result.confidence
 
-        # STEP 2: Run analyzers
-        logger.info(f"Running {len(self.analyzers)} analyzers...")
-        result = await self._run_analyzers(result, input_data, context)
+        # STEP 2: Run analyzers (unless skipped for counterfactual re-runs)
+        if not skip_analyzers:
+            logger.info(f"Running {len(self.analyzers)} analyzers...")
+            result = await self._run_analyzers(result, input_data, context)
+        else:
+            logger.info("Skipping analyzers (counterfactual re-run mode)")
 
         # STEP 3: Determine final decision
         result = self._determine_final_decision(result)
@@ -480,9 +499,16 @@ class TrustChain:
 
                 # Use async version if available
                 if hasattr(analyzer, 'analyze_async'):
-                    ar = await analyzer.analyze_async(
-                        result.strategy_result, input_data, context
-                    )
+                    # Phase 5: Pass trustchain_instance to counterfactual analyzer
+                    if analyzer.name == "counterfactual_fairness":
+                        ar = await analyzer.analyze_async(
+                            result.strategy_result, input_data, context,
+                            trustchain_instance=self
+                        )
+                    else:
+                        ar = await analyzer.analyze_async(
+                            result.strategy_result, input_data, context
+                        )
                 else:
                     ar = analyzer.analyze(
                         result.strategy_result, input_data, context

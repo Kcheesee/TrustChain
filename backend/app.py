@@ -30,6 +30,9 @@ Endpoints:
     - POST /api/v2/safeguards/flag-reviewer/{id} - Flag bad actor
     - POST /api/v2/safeguards/unflag-reviewer/{id} - Unflag reviewer
 
+    v2 Counterfactual Fairness (Phase 5):
+    - POST /api/v2/counterfactual-test - Run counterfactual fairness test
+
 Run with: uvicorn app:app --reload
 
 Built with care by Kareem & Claude
@@ -785,6 +788,157 @@ async def get_config(config_name: str):
 
 def _format_prompt_v2(request: EvaluateRequest) -> str:
     """Format input data into a prompt for v2 API."""
+    formatted_data = "\n".join([f"- {k}: {v}" for k, v in request.input_data.items()])
+    return f"""
+Decision Request - Case #{request.case_id}
+Type: {request.decision_type}
+
+Case Details:
+{formatted_data}
+
+Please evaluate this case and provide:
+1. Your decision (APPROVE, DENY, or NEEDS_REVIEW)
+2. Step-by-step reasoning
+3. Your confidence level (0-1)
+"""
+
+
+# ============================================================================
+# V2 COUNTERFACTUAL FAIRNESS API (Phase 5)
+# ============================================================================
+
+class CounterfactualTestRequest(BaseModel):
+    """Request model for counterfactual fairness testing."""
+    case_id: str
+    decision_type: str
+    input_data: Dict[str, Any]
+    context: Optional[Dict[str, Any]] = None
+    config_name: Optional[str] = None
+
+
+@app.post("/api/v2/counterfactual-test", status_code=status.HTTP_201_CREATED)
+async def run_counterfactual_test(request: CounterfactualTestRequest):
+    """
+    Run counterfactual fairness test on a decision.
+
+    This generates counterfactual versions of the input (e.g., swap names,
+    locations, gender indicators) and checks if decisions change based on
+    protected attributes.
+
+    If changing "Jamal" to "Brad" flips a rejection to approval, that's
+    measurable discrimination.
+
+    Args:
+        request: CounterfactualTestRequest with case details
+
+    Returns:
+        Original decision plus counterfactual analysis with fairness score
+
+    Example:
+        POST /api/v2/counterfactual-test
+        {
+            "case_id": "hire_candidate_123",
+            "decision_type": "hiring",
+            "input_data": {
+                "name": "Jamal Washington",
+                "location": "Detroit, MI",
+                "university": "Wayne State University",
+                "experience": "8 years software engineering",
+                "skills": ["Python", "React", "AWS"]
+            }
+        }
+
+    Response:
+        {
+            "case_id": "hire_candidate_123",
+            "original_decision": "denied",
+            "fairness_score": 0.33,
+            "biases_detected": ["name", "location"],
+            "counterfactual_analysis": {...}
+        }
+    """
+    global orchestrator
+
+    logger.info(f"🔬 Counterfactual fairness test: {request.case_id}")
+
+    try:
+        # Create TrustChain instance with counterfactual testing enabled
+        tc = TrustChain(
+            providers=orchestrator.providers if orchestrator else [],
+            enable_counterfactual_testing=True
+        )
+
+        # Load config if specified
+        if request.config_name:
+            config_path = Path(__file__).parent.parent / "configs" / f"{request.config_name}.yaml"
+            if config_path.exists():
+                tc = TrustChain.from_config(
+                    str(config_path),
+                    providers=orchestrator.providers if orchestrator else []
+                )
+                # Re-enable counterfactual testing (from_config doesn't pass this)
+                from analyzers.counterfactual_fairness import CounterfactualFairnessAnalyzer
+                cf_analyzer = CounterfactualFairnessAnalyzer()
+                cf_analyzer._blocking = True
+                tc.analyzers.append(cf_analyzer)
+                tc.enable_counterfactual_testing = True
+                logger.info(f"Loaded config: {request.config_name}")
+
+        # Build context
+        context = request.context or {}
+        context["decision_type"] = request.decision_type
+
+        # Build prompt if not provided
+        if "prompt" not in context:
+            context["prompt"] = _format_counterfactual_prompt(request)
+
+        # Run evaluation with counterfactual testing
+        result = await tc.evaluate(
+            case_id=request.case_id,
+            input_data=request.input_data,
+            context=context
+        )
+
+        # Extract counterfactual analysis
+        cf_analysis = None
+        for ar in result.analysis_results:
+            if ar.analyzer_name == "counterfactual_fairness":
+                cf_analysis = ar.details
+                break
+
+        # Store result
+        accountability_store[result.result_id] = result
+
+        logger.info(
+            f"✅ Counterfactual test complete: {result.result_id} - "
+            f"fairness_score={cf_analysis.get('fairness_score', 'N/A') if cf_analysis else 'N/A'}"
+        )
+
+        return {
+            "result_id": result.result_id,
+            "case_id": request.case_id,
+            "original_decision": result.final_decision.value,
+            "original_confidence": result.overall_confidence,
+            "requires_review": result.requires_human_review,
+            "fairness_score": cf_analysis.get("fairness_score") if cf_analysis else None,
+            "biases_detected": cf_analysis.get("biases_detected", []) if cf_analysis else [],
+            "bias_strength": cf_analysis.get("bias_strength") if cf_analysis else None,
+            "counterfactual_analysis": cf_analysis,
+            "summary": cf_analysis.get("summary") if cf_analysis else "No counterfactual analysis performed",
+            "recommendations": cf_analysis.get("recommendations", []) if cf_analysis else [],
+            "timestamp": result.timestamp.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Counterfactual test failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Counterfactual test failed: {str(e)}"
+        )
+
+
+def _format_counterfactual_prompt(request: CounterfactualTestRequest) -> str:
+    """Format input data into a prompt for counterfactual testing."""
     formatted_data = "\n".join([f"- {k}: {v}" for k, v in request.input_data.items()])
     return f"""
 Decision Request - Case #{request.case_id}

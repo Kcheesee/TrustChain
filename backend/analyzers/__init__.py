@@ -27,9 +27,30 @@ from core.registry import register_component
 # Import analyzers here as they're implemented
 from .protected_attributes import ProtectedAttributesAnalyzer
 from .proxy_variables import ProxyVariablesAnalyzer
+from .counterfactual_generator import (
+    CounterfactualGenerator,
+    Counterfactual,
+    CounterfactualModification,
+    ProtectedAttribute,
+)
+from .counterfactual_fairness import (
+    CounterfactualFairnessAnalyzer,
+    CounterfactualResult,
+    CounterfactualFairnessResult,
+    BiasStrength,
+)
 
 __all__ = [
     "BaseAnalyzer",
     "ProtectedAttributesAnalyzer",
     "ProxyVariablesAnalyzer",
+    # Counterfactual Fairness (Phase 5)
+    "CounterfactualGenerator",
+    "Counterfactual",
+    "CounterfactualModification",
+    "ProtectedAttribute",
+    "CounterfactualFairnessAnalyzer",
+    "CounterfactualResult",
+    "CounterfactualFairnessResult",
+    "BiasStrength",
 ]
