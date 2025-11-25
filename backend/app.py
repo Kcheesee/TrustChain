@@ -33,6 +33,14 @@ Endpoints:
     v2 Counterfactual Fairness (Phase 5):
     - POST /api/v2/counterfactual-test - Run counterfactual fairness test
 
+    v2 Dashboard (Phase 6 - Real-time):
+    - WS /ws/stream - WebSocket for real-time updates
+    - GET /api/v2/dashboard/summary - Metrics summary
+    - GET /api/v2/dashboard/time-series - Time series data
+    - GET /api/v2/dashboard/reviewers - Reviewer activity
+    - GET /api/v2/dashboard/bias - Bias detection breakdown
+    - GET /api/v2/dashboard/ws-stats - WebSocket stats
+
 Run with: uvicorn app:app --reload
 
 Built with care by Kareem & Claude
@@ -45,14 +53,14 @@ from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status, Query
+from fastapi import FastAPI, HTTPException, status, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from providers import ProviderConfig
-from services import DecisionOrchestrator, TrustChain
+from services import DecisionOrchestrator, TrustChain, manager, dashboard_metrics, TimeWindow
 from models import DecisionRequest, DecisionResponse, DecisionStatus
 
 # Import core components to register them
@@ -1577,6 +1585,261 @@ async def unflag_reviewer(reviewer_id: str, reason: str = Query(...)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to unflag reviewer: {str(e)}"
         )
+
+
+# ============================================================================
+# V2 DASHBOARD API ENDPOINTS (Phase 6 - Real-time)
+# ============================================================================
+
+@app.websocket("/ws/stream")
+async def websocket_stream(
+    websocket: WebSocket,
+    channels: str = "decisions",
+    client_id: Optional[str] = None
+):
+    """
+    WebSocket endpoint for real-time TrustChain updates.
+
+    Connect to receive live streams of:
+    - decisions: Real-time decision results
+    - metrics: System metrics updates
+    - alerts: Bias alerts and system notifications
+    - reviewers: Reviewer activity
+    - fairness: Counterfactual fairness results
+    - all: Subscribe to everything
+
+    Query Parameters:
+        channels: Comma-separated list of channels (default: "decisions")
+        client_id: Optional client identifier for tracking
+
+    Example:
+        ws://localhost:8000/ws/stream?channels=decisions,alerts&client_id=dashboard_1
+    """
+    # Parse channels
+    channel_list = [c.strip() for c in channels.split(",")]
+
+    try:
+        # Connect and subscribe
+        connection = await manager.connect(
+            websocket,
+            channels=channel_list,
+            client_id=client_id
+        )
+
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                # Wait for incoming messages (ping/pong, filter updates, etc.)
+                data = await websocket.receive_json()
+
+                # Handle filter updates
+                if data.get("type") == "set_filter":
+                    connection.filters = data.get("filters", {})
+                    await websocket.send_json({
+                        "type": "filter_updated",
+                        "filters": connection.filters,
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                # Handle channel subscription changes
+                elif data.get("type") == "subscribe":
+                    new_channels = data.get("channels", [])
+                    for ch in new_channels:
+                        connection.channels.add(ch)
+                    await websocket.send_json({
+                        "type": "subscribed",
+                        "channels": list(connection.channels),
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                # Handle ping
+                elif data.get("type") == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+            except WebSocketDisconnect:
+                break
+
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        manager.disconnect(websocket, reason="connection_closed")
+
+
+@app.get("/api/v2/dashboard/summary")
+async def get_dashboard_summary(
+    window: str = Query(default="hour", regex="^(minute|hour|day|week)$"),
+    decision_type: Optional[str] = None
+):
+    """
+    Get aggregated metrics summary for the dashboard.
+
+    Query Parameters:
+        window: Time window (minute, hour, day, week)
+        decision_type: Optional filter by decision type
+
+    Returns:
+        MetricsSummary with counts, rates, and aggregates
+    """
+    try:
+        time_window = TimeWindow(window)
+        summary = dashboard_metrics.get_summary(
+            window=time_window,
+            decision_type=decision_type
+        )
+
+        return {
+            "summary": {
+                "total_decisions": summary.total_decisions,
+                "decisions_approved": summary.decisions_approved,
+                "decisions_denied": summary.decisions_denied,
+                "decisions_needs_review": summary.decisions_needs_review,
+                "approval_rate": round(summary.approval_rate, 3),
+                "review_rate": round(summary.review_rate, 3),
+                "avg_confidence": round(summary.avg_confidence, 3),
+                "min_confidence": round(summary.min_confidence, 3),
+                "max_confidence": round(summary.max_confidence, 3),
+                "avg_fairness_score": round(summary.avg_fairness_score, 3),
+                "decisions_with_bias": summary.decisions_with_bias,
+                "bias_rate": round(summary.bias_rate, 3),
+                "common_biases": summary.common_biases,
+                "decisions_per_minute": round(summary.decisions_per_minute, 2),
+                "avg_latency_ms": round(summary.avg_latency_ms, 1),
+                "by_decision_type": summary.by_decision_type,
+            },
+            "window": window,
+            "window_start": summary.window_start.isoformat() if summary.window_start else None,
+            "window_end": summary.window_end.isoformat() if summary.window_end else None,
+            "decision_type_filter": decision_type,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get dashboard summary: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get dashboard summary: {str(e)}"
+        )
+
+
+@app.get("/api/v2/dashboard/time-series")
+async def get_dashboard_time_series(
+    metric: str = Query(default="decisions", regex="^(decisions|fairness|confidence)$"),
+    window: str = Query(default="hour", regex="^(minute|hour|day|week)$"),
+    granularity: int = Query(default=5, ge=1, le=60)
+):
+    """
+    Get time series data for dashboard charts.
+
+    Query Parameters:
+        metric: Type of metric (decisions, fairness, confidence)
+        window: Time window (minute, hour, day, week)
+        granularity: Data point interval in minutes (1-60)
+
+    Returns:
+        List of time series data points for charting
+    """
+    try:
+        time_window = TimeWindow(window)
+        series = dashboard_metrics.get_time_series(
+            metric_type=metric,
+            window=time_window,
+            granularity_minutes=granularity
+        )
+
+        return {
+            "metric": metric,
+            "window": window,
+            "granularity_minutes": granularity,
+            "data_points": len(series),
+            "series": series,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get time series: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get time series: {str(e)}"
+        )
+
+
+@app.get("/api/v2/dashboard/reviewers")
+async def get_reviewer_activity(
+    window: str = Query(default="day", regex="^(hour|day|week)$")
+):
+    """
+    Get reviewer activity summary for the dashboard.
+
+    Query Parameters:
+        window: Time window (hour, day, week)
+
+    Returns:
+        Reviewer activity metrics and breakdown
+    """
+    try:
+        time_window = TimeWindow(window)
+        summary = dashboard_metrics.get_reviewer_summary(window=time_window)
+
+        return {
+            "reviewer_activity": summary,
+            "window": window,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get reviewer activity: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reviewer activity: {str(e)}"
+        )
+
+
+@app.get("/api/v2/dashboard/bias")
+async def get_bias_breakdown(
+    window: str = Query(default="day", regex="^(hour|day|week)$")
+):
+    """
+    Get detailed bias detection breakdown.
+
+    Query Parameters:
+        window: Time window (hour, day, week)
+
+    Returns:
+        Bias detection metrics and breakdown by type
+    """
+    try:
+        time_window = TimeWindow(window)
+        breakdown = dashboard_metrics.get_bias_breakdown(window=time_window)
+
+        return {
+            "bias_breakdown": breakdown,
+            "window": window,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get bias breakdown: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get bias breakdown: {str(e)}"
+        )
+
+
+@app.get("/api/v2/dashboard/ws-stats")
+async def get_websocket_stats():
+    """
+    Get WebSocket connection statistics.
+
+    Returns:
+        Connection counts and channel distribution
+    """
+    return {
+        "websocket_stats": manager.get_stats(),
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 # ============================================================================

@@ -13,10 +13,20 @@ Built with care by Kareem & Claude
 from .orchestrator import DecisionOrchestrator
 from .bias_detection import BiasDetectionService, get_bias_detector
 from .trustchain import TrustChain
+from .websocket_manager import ConnectionManager, manager, ChannelType
+from .dashboard_metrics import DashboardMetrics, dashboard_metrics, TimeWindow, MetricsSummary
 
 __all__ = [
     # New modular service
     "TrustChain",
+    # Phase 6: Real-time dashboard
+    "ConnectionManager",
+    "manager",
+    "ChannelType",
+    "DashboardMetrics",
+    "dashboard_metrics",
+    "TimeWindow",
+    "MetricsSummary",
     # Legacy services (kept for backward compatibility)
     "DecisionOrchestrator",
     "BiasDetectionService",
