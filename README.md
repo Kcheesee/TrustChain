@@ -593,16 +593,4 @@ Built with:
 
 ---
 
-## 📞 Contact
-
-**Kareem** - AI Engineer transitioning from government consulting
-
-- Portfolio: [your-portfolio.com]
-- LinkedIn: [linkedin.com/in/yourprofile]
-- Email: [your-email@example.com]
-
----
-
-**Built with care to demonstrate technical excellence and deep understanding of government AI compliance requirements.**
-
-*Perfect for roles at Anthropic, OpenAI, and other AI safety-focused organizations.* 🚀
+**Built for high-stakes government AI decisions with accountability and transparency.**

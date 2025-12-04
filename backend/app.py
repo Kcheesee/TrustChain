@@ -53,14 +53,18 @@ from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, status, Query, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
+# Phase 10: Enterprise middleware
+from middleware.auth import api_key_auth, require_api_key, Scope, get_api_key_info, APIKeyInfo
+from middleware.rate_limit import rate_limiter, RateLimitExceeded
+
 from providers import ProviderConfig
-from services import DecisionOrchestrator, TrustChain, manager, dashboard_metrics, TimeWindow
+from services import DecisionOrchestrator, TrustChain, manager, dashboard_metrics, TimeWindow, health_service, analytics_service, ReportFormat
 from models import DecisionRequest, DecisionResponse, DecisionStatus
 
 # Import core components to register them
@@ -356,6 +360,81 @@ async def provider_status():
         "providers": health_info["providers"],
         "timestamp": datetime.now().isoformat()
     }
+
+
+# =============================================================================
+# Phase 7: Production Health & Monitoring Endpoints
+# =============================================================================
+
+@app.get("/api/v2/health")
+async def health_check_v2(details: bool = Query(True, description="Include detailed metrics")):
+    """
+    Enhanced health check with system metrics.
+
+    Returns comprehensive health status including:
+    - Overall system status (healthy/degraded/unhealthy)
+    - Component-level health
+    - System resource metrics (memory, CPU, disk)
+    - Service uptime
+
+    Use for monitoring dashboards and alerting.
+    """
+    health = await health_service.get_health(include_details=details)
+
+    return {
+        "status": health.status.value,
+        "timestamp": health.timestamp,
+        "version": health.version,
+        "environment": health.environment,
+        "uptime_seconds": health.uptime_seconds,
+        "components": {
+            name: {
+                "status": comp.status.value,
+                "message": comp.message,
+                "details": comp.details
+            }
+            for name, comp in health.components.items()
+        },
+        "system_metrics": health.system_metrics
+    }
+
+
+@app.get("/api/v2/health/live")
+async def liveness_probe():
+    """
+    Kubernetes liveness probe.
+
+    Returns 200 if the service is alive, 503 otherwise.
+    Used by orchestrators to determine if the container should be restarted.
+
+    This is a simple check - if the server responds, it's alive.
+    """
+    is_alive = await health_service.is_alive()
+    if is_alive:
+        return {"status": "alive"}
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"status": "dead"}
+    )
+
+
+@app.get("/api/v2/health/ready")
+async def readiness_probe():
+    """
+    Kubernetes readiness probe.
+
+    Returns 200 if the service can accept traffic, 503 otherwise.
+    Used by load balancers to determine if traffic should be routed here.
+
+    Checks that critical components are healthy before reporting ready.
+    """
+    is_ready = await health_service.is_ready()
+    if is_ready:
+        return {"status": "ready"}
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"status": "not_ready"}
+    )
 
 
 @app.post("/api/v1/decisions", response_model=DecisionResponse, status_code=status.HTTP_201_CREATED)
@@ -1839,6 +1918,367 @@ async def get_websocket_stats():
     return {
         "websocket_stats": manager.get_stats(),
         "timestamp": datetime.now().isoformat(),
+    }
+
+
+# =============================================================================
+# Phase 9: Analytics and Reporting Endpoints
+# =============================================================================
+
+# Initialize analytics with metrics source
+analytics_service.set_metrics_source(dashboard_metrics)
+
+
+@app.get("/api/v2/analytics/trends")
+async def get_decision_trends(
+    days: int = Query(7, ge=1, le=30, description="Number of days to analyze"),
+    decision_type: Optional[str] = Query(None, description="Filter by decision type")
+):
+    """
+    Get decision trends over time.
+
+    Returns daily decision counts, approval rates, and confidence scores
+    for the specified time period.
+    """
+    try:
+        trends = analytics_service.get_decision_trends(days, decision_type)
+        return {
+            "trends": [
+                {
+                    "date": t.date,
+                    "total": t.total,
+                    "approved": t.approved,
+                    "denied": t.denied,
+                    "needs_review": t.needs_review,
+                    "approval_rate": t.approval_rate,
+                    "avg_confidence": t.avg_confidence
+                }
+                for t in trends
+            ],
+            "period_days": days,
+            "decision_type": decision_type,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get decision trends: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get decision trends: {str(e)}"
+        )
+
+
+@app.get("/api/v2/analytics/fairness-report")
+async def get_fairness_report(
+    days: int = Query(1, ge=1, le=30, description="Number of days to analyze")
+):
+    """
+    Generate comprehensive fairness report.
+
+    Returns bias detection rates, breakdown by type, and recommendations.
+    """
+    try:
+        report = analytics_service.generate_fairness_report(days)
+        return {
+            "report_id": report.report_id,
+            "generated_at": report.generated_at,
+            "period": {
+                "start": report.period_start,
+                "end": report.period_end
+            },
+            "summary": report.summary,
+            "bias_breakdown": report.bias_breakdown,
+            "recommendations": report.recommendations,
+            "by_decision_type": report.decision_type_analysis
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate fairness report: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate fairness report: {str(e)}"
+        )
+
+
+@app.get("/api/v2/analytics/reviewer-performance")
+async def get_reviewer_performance(
+    days: int = Query(30, ge=1, le=90, description="Number of days to analyze")
+):
+    """
+    Get reviewer performance metrics.
+
+    Returns review counts, agreement rates, and override rates per reviewer.
+    """
+    try:
+        performance = analytics_service.get_reviewer_performance(days)
+        return {
+            "reviewers": [
+                {
+                    "reviewer_id": p.reviewer_id,
+                    "total_reviews": p.total_reviews,
+                    "agreements": p.agreements,
+                    "overrides": p.overrides,
+                    "escalations": p.escalations,
+                    "agreement_rate": p.agreement_rate,
+                    "override_rate": p.override_rate
+                }
+                for p in performance
+            ],
+            "period_days": days,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Failed to get reviewer performance: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reviewer performance: {str(e)}"
+        )
+
+
+@app.get("/api/v2/analytics/report")
+async def get_full_analytics_report(
+    days: int = Query(7, ge=1, le=30, description="Number of days to analyze"),
+    format: str = Query("json", description="Export format: json or csv")
+):
+    """
+    Generate full analytics report.
+
+    Returns comprehensive report with decisions, fairness, and reviewer data.
+    Can be exported as JSON or CSV.
+    """
+    try:
+        report = analytics_service.generate_full_report(days)
+
+        if format.lower() == "csv":
+            csv_content = analytics_service.export_report(report, ReportFormat.CSV)
+            return JSONResponse(
+                content={
+                    "format": "csv",
+                    "content": csv_content,
+                    "report_id": report.report_id
+                }
+            )
+
+        return {
+            "report_id": report.report_id,
+            "generated_at": report.generated_at,
+            "period": report.period,
+            "decision_summary": report.decision_summary,
+            "fairness_summary": report.fairness_summary,
+            "reviewer_summary": report.reviewer_summary,
+            "trends": report.trends,
+            "alerts": report.alerts
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate analytics report: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate analytics report: {str(e)}"
+        )
+
+
+# =============================================================================
+# Phase 10: Enterprise Security (API Key Auth & Rate Limiting)
+# =============================================================================
+
+# Rate limit exception handler
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded errors."""
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={
+            "error": "rate_limit_exceeded",
+            "message": exc.detail,
+            "retry_after": exc.retry_after
+        },
+        headers={"Retry-After": str(exc.retry_after)}
+    )
+
+
+# Pydantic models for API key management
+class CreateAPIKeyRequest(BaseModel):
+    """Request to create a new API key."""
+    client_name: str
+    scopes: List[str] = ["read"]
+    rate_limit_per_minute: int = 60
+
+
+class APIKeyResponse(BaseModel):
+    """Response containing API key info."""
+    key_id: str
+    client_name: str
+    scopes: List[str]
+    created_at: str
+    rate_limit_per_minute: int
+
+
+@app.post("/api/v2/admin/keys", response_model=APIKeyResponse)
+async def create_api_key(
+    request: CreateAPIKeyRequest,
+    admin_key: APIKeyInfo = require_api_key(scopes=[Scope.ADMIN])
+):
+    """
+    Create a new API key.
+
+    Requires admin scope.
+    """
+    try:
+        # Convert string scopes to Scope enum
+        scopes = []
+        for s in request.scopes:
+            try:
+                scopes.append(Scope(s))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid scope: {s}. Valid scopes: {[e.value for e in Scope]}"
+                )
+
+        raw_key, key_info = api_key_auth.generate_key(
+            client_name=request.client_name,
+            scopes=scopes,
+            rate_limit_per_minute=request.rate_limit_per_minute
+        )
+
+        # Return the raw key only once - it cannot be retrieved later
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content={
+                "api_key": raw_key,  # Only returned once!
+                "key_id": key_info.key_id,
+                "client_name": key_info.client_name,
+                "scopes": [s.value for s in key_info.scopes],
+                "created_at": key_info.created_at.isoformat(),
+                "rate_limit_per_minute": key_info.rate_limit_per_minute,
+                "warning": "Save this API key - it cannot be retrieved later!"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create API key: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create API key"
+        )
+
+
+@app.get("/api/v2/admin/keys")
+async def list_api_keys(
+    admin_key: APIKeyInfo = require_api_key(scopes=[Scope.ADMIN])
+):
+    """
+    List all API keys.
+
+    Requires admin scope. Does not return the actual key values.
+    """
+    keys = api_key_auth.list_keys()
+    return {
+        "keys": [
+            {
+                "key_id": k.key_id,
+                "client_name": k.client_name,
+                "scopes": [s.value for s in k.scopes],
+                "created_at": k.created_at.isoformat(),
+                "last_used": k.last_used.isoformat() if k.last_used else None,
+                "is_active": k.is_active,
+                "rate_limit_per_minute": k.rate_limit_per_minute
+            }
+            for k in keys
+        ],
+        "total": len(keys)
+    }
+
+
+@app.delete("/api/v2/admin/keys/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    admin_key: APIKeyInfo = require_api_key(scopes=[Scope.ADMIN])
+):
+    """
+    Revoke an API key.
+
+    Requires admin scope.
+    """
+    if api_key_auth.revoke_key(key_id):
+        return {"status": "revoked", "key_id": key_id}
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"API key not found: {key_id}"
+    )
+
+
+@app.get("/api/v2/admin/rate-limits")
+async def get_rate_limit_stats(
+    admin_key: APIKeyInfo = require_api_key(scopes=[Scope.ADMIN])
+):
+    """
+    Get rate limiter statistics.
+
+    Requires admin scope.
+    """
+    return {
+        "stats": rate_limiter.get_stats(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.post("/api/v2/admin/rate-limits/reset")
+async def reset_rate_limits(
+    client_id: Optional[str] = Query(None, description="Specific client ID to reset"),
+    admin_key: APIKeyInfo = require_api_key(scopes=[Scope.ADMIN])
+):
+    """
+    Reset rate limits.
+
+    Requires admin scope.
+    """
+    if client_id:
+        if rate_limiter.reset_client(client_id):
+            return {"status": "reset", "client_id": client_id}
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Client not found: {client_id}"
+        )
+
+    rate_limiter.reset_all()
+    return {"status": "reset_all"}
+
+
+@app.get("/api/v2/auth/me")
+async def get_current_key_info(
+    key_info: APIKeyInfo = require_api_key()
+):
+    """
+    Get information about the current API key.
+
+    Useful for clients to verify their key is working.
+    """
+    return {
+        "key_id": key_info.key_id,
+        "client_name": key_info.client_name,
+        "scopes": [s.value for s in key_info.scopes],
+        "rate_limit_per_minute": key_info.rate_limit_per_minute,
+        "last_used": key_info.last_used.isoformat() if key_info.last_used else None
+    }
+
+
+@app.get("/api/v2/protected/example")
+async def protected_example(
+    request: Request,
+    key_info: APIKeyInfo = require_api_key(scopes=[Scope.READ]),
+    _: None = Depends(rate_limiter.check_limit)
+):
+    """
+    Example protected endpoint with rate limiting.
+
+    Requires API key with read scope and respects rate limits.
+    """
+    return {
+        "message": "Access granted!",
+        "client": key_info.client_name,
+        "scopes": [s.value for s in key_info.scopes],
+        "rate_limit_remaining": request.state.rate_limit_info.get("remaining") if hasattr(request.state, "rate_limit_info") else None
     }
 
 

@@ -8,7 +8,7 @@ Built with care by Kareem & Claude
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from core.base import BaseOutput

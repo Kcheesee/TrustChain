@@ -1,0 +1,28 @@
+# TrustChain Docker Compose - Development Override
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Built with care by Kareem & Claude
+
+services:
+  api:
+    build:
+      target: development
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=DEBUG
+      - DATABASE_URL=postgresql://trustchain:trustchain_secret@db:5432/trustchain_dev
+    volumes:
+      # Mount source code for hot reload
+      - .:/app
+      - /app/__pycache__
+      - /app/.pytest_cache
+    ports:
+      - "8000:8000"
+
+  db:
+    environment:
+      - POSTGRES_DB=trustchain_dev
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts with local postgres

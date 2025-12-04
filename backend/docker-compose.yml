@@ -1,0 +1,121 @@
+# TrustChain Docker Compose Configuration
+# Production-ready setup with PostgreSQL
+#
+# Usage:
+#   docker-compose up -d              # Start all services
+#   docker-compose up -d --build      # Rebuild and start
+#   docker-compose logs -f api        # View API logs
+#   docker-compose down               # Stop all services
+#
+# Built with care by Kareem & Claude
+
+services:
+  # ==========================================================================
+  # TrustChain API
+  # ==========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: trustchain-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://trustchain:trustchain_secret@db:5432/trustchain
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      # AI Provider keys (set via .env or environment)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - trustchain-network
+    volumes:
+      - ./logs:/app/logs
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  db:
+    image: postgres:15-alpine
+    container_name: trustchain-db
+    environment:
+      - POSTGRES_USER=trustchain
+      - POSTGRES_PASSWORD=trustchain_secret
+      - POSTGRES_DB=trustchain
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustchain -d trustchain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - trustchain-network
+
+  # ==========================================================================
+  # Ollama (Local LLM - Optional)
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: trustchain-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - trustchain-network
+    profiles:
+      - local-llm
+
+  # ==========================================================================
+  # Redis (Caching - Optional, for future use)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: trustchain-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - trustchain-network
+    profiles:
+      - with-cache
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  trustchain-network:
+    driver: bridge
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  postgres_data:
+  ollama_data:
+  redis_data:
